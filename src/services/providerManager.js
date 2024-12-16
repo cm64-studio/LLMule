@@ -73,23 +73,26 @@ class ProviderManager {
     const providerInfo = this.findAvailableProvider(requestData.model);
     
     if (!providerInfo) {
-      throw new Error('No available providers');
+        throw new Error('No available providers');
     }
 
     const requestId = uuidv4();
     return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        this.pendingRequests.delete(requestId);
-        reject(new Error('Request timeout'));
-      }, 30000);
+        // Increased timeout to 5 minutes
+        const timeout = setTimeout(() => {
+            this.pendingRequests.delete(requestId);
+            reject(new Error('Request timeout after 5 minutes'));
+        }, 300000); // 5 minutes in milliseconds
 
-      this.pendingRequests.set(requestId, { resolve, reject, timeout });
-      
-      providerInfo.provider.ws.send(JSON.stringify({
-        type: 'completion_request',
-        requestId,
-        ...requestData
-      }));
+        this.pendingRequests.set(requestId, { resolve, reject, timeout });
+        
+        providerInfo.provider.ws.send(JSON.stringify({
+            type: 'completion_request',
+            requestId,
+            ...requestData,
+            temperature: requestData.temperature || 0.7,
+            max_tokens: requestData.max_tokens || 4096
+        }));
     });
   }
 
