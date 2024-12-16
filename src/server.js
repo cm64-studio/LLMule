@@ -41,6 +41,14 @@ app.get('/debug/providers', (req, res) => {
   }
 });
 
+app.get('/debug/load-balancing', (req, res) => {
+  const stats = app.locals.providerManager.getLoadBalancingStats();
+  res.json({
+    stats,
+    timestamp: new Date().toISOString()
+  });
+});
+
 app.get('/debug/status', (req, res) => {
   const manager = app.locals.providerManager;
   res.json({

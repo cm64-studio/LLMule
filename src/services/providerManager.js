@@ -1,17 +1,12 @@
-// src/services/providerManager.js
 const { v4: uuidv4 } = require('uuid');
 
 class ProviderManager {
   constructor() {
     this.providers = new Map();
     this.pendingRequests = new Map();
-    console.log('ProviderManager initialized with empty providers Map');
+    this.requestCounts = new Map();
+    console.log('ProviderManager initialized with load balancing');
     this.startHealthCheck();
-  }
-
-  // Remove the singleton logic as it was causing issues
-  static getInstance() {
-    return new ProviderManager();
   }
 
   registerProvider(providerId, providerInfo) {
@@ -26,6 +21,9 @@ class ProviderManager {
       ...providerInfo,
       lastSeen: Date.now()
     });
+    
+    // Initialize request count for new provider
+    this.requestCounts.set(providerId, 0);
 
     this.logProvidersState();
   }
@@ -33,6 +31,7 @@ class ProviderManager {
   removeProvider(providerId) {
     console.log(`Removing provider: ${providerId}`);
     this.providers.delete(providerId);
+    this.requestCounts.delete(providerId);
     this.logProvidersState();
   }
 
@@ -48,24 +47,37 @@ class ProviderManager {
   }
 
   findAvailableProvider(model = null) {
-    console.log('\n=== Finding Provider ===');
+    console.log('\n=== Finding Provider with Load Balancing ===');
     console.log('Finding provider for model:', model);
-    console.log('Current providers size:', this.providers.size);
-
-    for (const [id, provider] of this.providers) {
-      console.log('Checking provider:', id, {
-        status: provider.status,
-        models: provider.models,
-        hasModel: !model || provider.models.includes(model)
-      });
-
-      if (provider.status === 'active' && 
-          (!model || provider.models.includes(model))) {
-        return { id, provider };
-      }
-    }
     
-    return null;
+    const eligibleProviders = Array.from(this.providers.entries())
+      .filter(([_, provider]) => 
+        provider.status === 'active' && 
+        (!model || provider.models.includes(model))
+      );
+
+    if (eligibleProviders.length === 0) {
+      console.log('No eligible providers found');
+      return null;
+    }
+
+    // Load balancing logic
+    const providersByLoad = eligibleProviders.map(([id, provider]) => ({
+      id,
+      provider,
+      load: this.requestCounts.get(id) || 0
+    })).sort((a, b) => a.load - b.load);
+
+    const selected = providersByLoad[0];
+    this.requestCounts.set(selected.id, (this.requestCounts.get(selected.id) || 0) + 1);
+
+    console.log('Selected provider:', {
+      id: selected.id,
+      currentLoad: selected.load,
+      totalProviders: eligibleProviders.length
+    });
+
+    return { id: selected.id, provider: selected.provider };
   }
 
   async routeRequest(requestData) {
@@ -73,32 +85,44 @@ class ProviderManager {
     const providerInfo = this.findAvailableProvider(requestData.model);
     
     if (!providerInfo) {
-        throw new Error('No available providers');
+      throw new Error('No available providers');
     }
 
     const requestId = uuidv4();
     return new Promise((resolve, reject) => {
-        // Increased timeout to 5 minutes
-        const timeout = setTimeout(() => {
-            this.pendingRequests.delete(requestId);
-            reject(new Error('Request timeout after 5 minutes'));
-        }, 300000); // 5 minutes in milliseconds
+      const timeout = setTimeout(() => {
+        this.pendingRequests.delete(requestId);
+        const currentCount = this.requestCounts.get(providerInfo.id) || 1;
+        this.requestCounts.set(providerInfo.id, currentCount - 1);
+        reject(new Error('Request timeout after 5 minutes'));
+      }, 300000);
 
-        this.pendingRequests.set(requestId, { resolve, reject, timeout });
-        
-        providerInfo.provider.ws.send(JSON.stringify({
-            type: 'completion_request',
-            requestId,
-            ...requestData,
-            temperature: requestData.temperature || 0.7,
-            max_tokens: requestData.max_tokens || 4096
-        }));
+      this.pendingRequests.set(requestId, { 
+        resolve, 
+        reject, 
+        timeout,
+        providerId: providerInfo.id
+      });
+      
+      providerInfo.provider.ws.send(JSON.stringify({
+        type: 'completion_request',
+        requestId,
+        ...requestData,
+        temperature: requestData.temperature || 0.7,
+        max_tokens: requestData.max_tokens || 4096
+      }));
     });
   }
 
   handleCompletionResponse(requestId, response) {
     const pendingRequest = this.pendingRequests.get(requestId);
     if (pendingRequest) {
+      // Decrease request count when request completes
+      if (pendingRequest.providerId) {
+        const currentCount = this.requestCounts.get(pendingRequest.providerId) || 1;
+        this.requestCounts.set(pendingRequest.providerId, currentCount - 1);
+      }
+      
       clearTimeout(pendingRequest.timeout);
       this.pendingRequests.delete(requestId);
       pendingRequest.resolve(response);
@@ -111,6 +135,8 @@ class ProviderManager {
       for (const [id, provider] of this.providers) {
         if (now - provider.lastSeen > 30000) {
           provider.status = 'inactive';
+          // Reset request count for inactive providers
+          this.requestCounts.set(id, 0);
           console.log(`Provider ${id} marked inactive due to timeout`);
         }
         if (provider.status === 'active') {
@@ -128,7 +154,8 @@ class ProviderManager {
         status: provider.status,
         models: provider.models,
         lastSeen: new Date(provider.lastSeen).toISOString(),
-        hasWebSocket: !!provider.ws
+        hasWebSocket: !!provider.ws,
+        currentLoad: this.requestCounts.get(id) || 0
       });
     }
     console.log('===============================\n');
@@ -140,13 +167,21 @@ class ProviderManager {
       models: provider.models || [],
       status: provider.status || 'unknown',
       lastSeen: provider.lastSeen ? new Date(provider.lastSeen).toISOString() : null,
-      hasWebSocket: !!provider.ws
+      hasWebSocket: !!provider.ws,
+      currentLoad: this.requestCounts.get(id) || 0
+    }));
+  }
+
+  getLoadBalancingStats() {
+    return Array.from(this.requestCounts.entries()).map(([id, count]) => ({
+      providerId: id,
+      activeRequests: count,
+      provider: this.providers.get(id)?.status
     }));
   }
 }
 
-// Export a new instance
 module.exports = {
-    ProviderManager,
-    providerManager: new ProviderManager()
+  ProviderManager,
+  providerManager: new ProviderManager()
 };

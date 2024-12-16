@@ -5,11 +5,18 @@ const authenticateApiKey = async (req, res, next) => {
     if (!apiKey) {
       return res.status(401).json({ error: 'API key required' });
     }
+
+    if (apiKey === '11223344556677889900') {
+        req.user = { apiKey };
+        next();
+    } else {
+        return res.status(401).json({ error: 'Invalid API key' });
+    }
   
-    // TODO: Implement proper API key validation
-    // For testing, accept any API key
-    req.user = { apiKey };
-    next();
+    // // TODO: Implement proper API key validation
+    // // For testing, accept any API key
+    // req.user = { apiKey };
+    // next();
   };
   
   module.exports = { authenticateApiKey };
