@@ -1,6 +1,6 @@
 // src/middleware/auth.js
 const authenticateApiKey = async (req, res, next) => {
-    const apiKey = req.headers['x-api-key'] || req.headers['authorization'];
+    var apiKey = req.headers['x-api-key'] || req.headers['authorization'];
     
     if (!apiKey) {
       return res.status(401).json({ error: 'API key required' });
