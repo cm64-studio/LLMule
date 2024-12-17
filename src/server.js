@@ -3,6 +3,7 @@ const express = require('express');
 const { createServer } = require('http');
 const WebSocket = require('ws');
 const { v4: uuidv4 } = require('uuid');
+const cors = require('cors');
 const config = require('./config');
 const { authenticateApiKey } = require('./middleware/auth');
 const { handleLLMRequest } = require('./controllers/llmController');
@@ -11,6 +12,9 @@ const { providerManager } = require('./services/providerManager');
 const app = express();
 const server = createServer(app);
 const wss = new WebSocket.Server({ server, path: config.websocket_path });
+
+// Simple CORS configuration for API
+app.use(cors());
 
 // Middleware
 app.use(express.json());
