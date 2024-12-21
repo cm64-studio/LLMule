@@ -1,5 +1,5 @@
 // src/services/authService.js
-const User = require('../models/user');
+const User = require('../models/userModel');
 const emailService = require('./emailService');
 const crypto = require('node:crypto'); // Changed this line
 

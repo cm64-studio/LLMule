@@ -1,5 +1,5 @@
 // src/middleware/auth.js
-const User = require('../models/user');
+const User = require('../models/userModel');
 
 const authenticateApiKey = async (req, res, next) => {
   try {

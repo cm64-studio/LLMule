@@ -1,5 +1,5 @@
 // src/middleware/rateLimiter.js
-const User = require('../models/user');
+const User = require('../models/userModel');
 
 const rateLimiter = async (req, res, next) => {
   try {
