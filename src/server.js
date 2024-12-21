@@ -2,28 +2,46 @@
 const express = require('express');
 const { createServer } = require('http');
 const WebSocket = require('ws');
+const mongoose = require('mongoose');
 const { v4: uuidv4 } = require('uuid');
 const cors = require('cors');
 const config = require('./config');
 const { authenticateApiKey } = require('./middleware/auth');
 const { handleLLMRequest } = require('./controllers/llmController');
+const authRoutes = require('./routes/auth'); // Add this line
 const { providerManager } = require('./services/providerManager');
+const { handleModelsList } = require('./controllers/modelController');
 
 const app = express();
 const server = createServer(app);
 const wss = new WebSocket.Server({ server, path: config.websocket_path });
+
+// MongoDB Connection
+mongoose.connect(config.mongodb_uri)
+  .then(() => console.log('Connected to MongoDB'))
+  .catch(err => {
+    console.error('MongoDB connection error:', err);
+    process.exit(1);
+  });
 
 // Simple CORS configuration for API
 app.use(cors());
 
 // Middleware
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
 
 // Make providerManager available to routes
 app.locals.providerManager = providerManager;
 
+// Add auth routes
+app.use('/auth', authRoutes); // Add this line
+
 // API Routes
 app.post('/v1/chat/completions', authenticateApiKey, handleLLMRequest);
+
+app.get('/v1/models', authenticateApiKey, handleModelsList);
 
 // Add this route in your server.js, replacing the existing debug endpoint:
 
@@ -66,10 +84,12 @@ app.get('/debug/status', (req, res) => {
   });
 });
 
-// Add a health check endpoint for good measure
+// Health check endpoint
 app.get('/health', (req, res) => {
+  const mongoStatus = mongoose.connection.readyState === 1 ? 'connected' : 'disconnected';
   res.json({
     status: 'ok',
+    mongodb: mongoStatus,
     timestamp: new Date().toISOString(),
     providersCount: providerManager.providers.size
   });
@@ -124,9 +144,40 @@ function handleProviderMessage(ws, providerId, data) {
 
 // Start server
 const PORT = config.port || 3000;
-server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-  console.log(`WebSocket server path: ${config.websocket_path}`);
+const HOST = '0.0.0.0'; // Esto hace que escuche en todas las interfaces
+
+server.listen(PORT, HOST, () => {
+  console.log(`\n=== LLMule Server Started ===`);
+  console.log(`🚀 Server running on:`);
+  console.log(`   - Local:    http://localhost:${PORT}`);
+  console.log(`   - Network:  http://${getLocalIP()}:${PORT}`);
+  console.log(`\n🔌 WebSocket server path: ${config.websocket_path}`);
+  console.log(`📦 MongoDB URI: ${config.mongodb_uri}`);
+});
+
+// Función helper para obtener IP local
+function getLocalIP() {
+  const { networkInterfaces } = require('os');
+  const nets = networkInterfaces();
+  
+  for (const name of Object.keys(nets)) {
+    for (const net of nets[name]) {
+      // Skip over non-IPv4 and internal (i.e. 127.0.0.1) addresses
+      if (net.family === 'IPv4' && !net.internal) {
+        return net.address;
+      }
+    }
+  }
+  return 'localhost';
+}
+
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('Received SIGTERM. Performing graceful shutdown...');
+  mongoose.connection.close();
+  server.close();
+  process.exit(0);
 });
 
 module.exports = { app, server };

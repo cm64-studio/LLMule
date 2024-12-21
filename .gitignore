@@ -47,3 +47,6 @@ coverage
 *.swo
 .tmp
 .temp 
+
+# Exported files
+exported-files.txt

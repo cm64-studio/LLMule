@@ -1,3 +1,4 @@
+// src/services/providerManager.js
 const { v4: uuidv4 } = require('uuid');
 
 class ProviderManager {
@@ -115,17 +116,47 @@ class ProviderManager {
   }
 
   handleCompletionResponse(requestId, response) {
+    console.log('\n=== Handling Completion Response ===');
+    console.log('Request ID:', requestId);
+    console.log('Response:', JSON.stringify(response, null, 2));
+
     const pendingRequest = this.pendingRequests.get(requestId);
-    if (pendingRequest) {
-      // Decrease request count when request completes
+    if (!pendingRequest) {
+      console.error('No pending request found for ID:', requestId);
+      return;
+    }
+
+    try {
+      // Cleanup
+      clearTimeout(pendingRequest.timeout);
+      this.pendingRequests.delete(requestId);
+
+      // Update request count
       if (pendingRequest.providerId) {
         const currentCount = this.requestCounts.get(pendingRequest.providerId) || 1;
         this.requestCounts.set(pendingRequest.providerId, currentCount - 1);
       }
-      
-      clearTimeout(pendingRequest.timeout);
-      this.pendingRequests.delete(requestId);
+
+      // Handle error responses
+      if (response.error) {
+        console.error('Error in provider response:', response.error);
+        pendingRequest.reject(new Error(response.error));
+        return;
+      }
+
+      // Validate response structure
+      if (!response.choices || !response.choices[0]?.message?.content) {
+        console.error('Invalid response structure:', response);
+        pendingRequest.reject(new Error('Invalid response from provider'));
+        return;
+      }
+
+      console.log('Successfully handled response');
       pendingRequest.resolve(response);
+
+    } catch (error) {
+      console.error('Error handling completion response:', error);
+      pendingRequest.reject(error);
     }
   }
 
