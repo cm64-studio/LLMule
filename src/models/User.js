@@ -1,4 +1,4 @@
-// src/models/user.js
+// src/models/User.js
 const mongoose = require('mongoose');
 const crypto = require('node:crypto');  // Changed this line
 
