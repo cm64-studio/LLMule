@@ -17,10 +17,12 @@ class AuthService {
     const verificationToken = user.generateEmailVerificationToken();
     
     await user.save();
+    console.log('User registered:', user);
     
     // Send verification email
+    console.log('Sending verification email to:', email);
     await emailService.sendVerificationEmail(email, verificationToken);
-    
+    console.log('Email sent');
     return {
       message: 'Registration successful. Please check your email for verification.',
       apiKey: user.apiKey
