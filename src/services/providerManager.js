@@ -178,12 +178,31 @@ class ProviderManager {
   }
 
   logProvidersState() {
+    const { ModelManager } = require('../config/models');
+    
     console.log('\n=== Current Providers State ===');
     console.log('Total providers:', this.providers.size);
+    
     for (const [id, provider] of this.providers) {
+      const modelDetails = provider.models.map(model => {
+        const info = ModelManager.getModelInfo(model) || {
+          tier: model.toLowerCase().includes('mistral') ? 'medium' : 'unknown',
+          requirements: model.toLowerCase().includes('mistral') ? {
+            ram: '8GB',
+            gpu: '8GB VRAM'
+          } : {}
+        };
+        
+        return {
+          name: model,
+          tier: info.tier,
+          requirements: info.requirements
+        };
+      });
+  
       console.log(`- Provider ${id}:`, {
         status: provider.status,
-        models: provider.models,
+        models: modelDetails,
         lastSeen: new Date(provider.lastSeen).toISOString(),
         hasWebSocket: !!provider.ws,
         currentLoad: this.requestCounts.get(id) || 0

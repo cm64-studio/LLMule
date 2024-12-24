@@ -1,61 +1,78 @@
-// src/services/tokenManager.js
-const { TokenBalance } = require('../models/mongodb-models');
+// src/services/TokenManager.js
+const TokenBalance = require('../models/TokenBalance');
 
 class TokenManager {
+  static TIERS = {
+    TINY: 'tiny',
+    SMALL: 'small',
+    MEDIUM: 'medium'
+  };
+
   static getModelTier(modelName) {
-    // Map model names to tiers
     const tierMap = {
-      'tinyllama': 'tiny',
-      'mistral:latest': 'small',
-      'phi-4:latest': 'medium'
+      'tinyllama': this.TIERS.TINY,
+      'mistral': this.TIERS.SMALL,
+      'phi-4': this.TIERS.MEDIUM
     };
-    return tierMap[modelName.toLowerCase()] || 'tiny';
-  }
-
-  static async updateTokenBalance(userId, modelName, tokensProvided = 0, tokensConsumed = 0) {
-    const modelTier = this.getModelTier(modelName);
     
-    try {
-      const balance = await TokenBalance.findOneAndUpdate(
-        { userId, modelTier },
-        {
-          $inc: {
-            tokensProvided: tokensProvided,
-            tokensConsumed: tokensConsumed
-          },
-          $set: { lastUpdated: new Date() }
-        },
-        { upsert: true, new: true }
-      );
-      
-      return balance;
-    } catch (error) {
-      console.error('Error updating token balance:', error);
-      throw error;
+    for (const [key, tier] of Object.entries(tierMap)) {
+      if (modelName.toLowerCase().includes(key)) {
+        return tier;
+      }
     }
+    return this.TIERS.TINY;
   }
 
-  static async getBalance(userId, modelTier) {
-    try {
-      const balance = await TokenBalance.findOne({ userId, modelTier });
-      return balance || { tokensProvided: 0, tokensConsumed: 0 };
-    } catch (error) {
-      console.error('Error getting token balance:', error);
-      throw error;
-    }
+  static async initializeBalance(userId) {
+    return await TokenBalance.create({ userId });
+  }
+
+  static async updateProviderTokens(userId, modelName, tokensProvided) {
+    const tier = this.getModelTier(modelName);
+    const update = { $inc: {} };
+    update.$inc[`provided.${tier}`] = tokensProvided;
+    
+    return await TokenBalance.findOneAndUpdate(
+      { userId },
+      update,
+      { upsert: true, new: true }
+    );
+  }
+
+  static async updateConsumerTokens(userId, modelName, tokensConsumed) {
+    const tier = this.getModelTier(modelName);
+    const update = { $inc: {} };
+    update.$inc[`consumed.${tier}`] = tokensConsumed;
+    
+    return await TokenBalance.findOneAndUpdate(
+      { userId },
+      update,
+      { new: true }
+    );
   }
 
   static async checkAllowance(userId, modelName, requestedTokens) {
-    const modelTier = this.getModelTier(modelName);
-    const balance = await this.getBalance(userId, modelTier);
+    const tier = this.getModelTier(modelName);
+    const balance = await TokenBalance.findOne({ userId });
     
-    // Basic allowance logic - can be enhanced
-    const netBalance = balance.tokensProvided - balance.tokensConsumed;
+    if (!balance) {
+      return { allowed: false, remaining: 0 };
+    }
+
+    const available = balance.getAvailableTokens(tier);
     return {
-      allowed: netBalance >= requestedTokens,
-      remaining: netBalance
+      allowed: available >= requestedTokens,
+      remaining: available
     };
+  }
+
+  static async getRemainingTokens(userId, modelName) {
+    const balance = await TokenBalance.findOne({ userId });
+    if (!balance) return 0;
+    
+    const tier = this.getModelTier(modelName);
+    return balance.getAvailableTokens(tier);
   }
 }
 
-module.exports = TokenManager;
+module.exports = { TokenManager, TokenBalance };

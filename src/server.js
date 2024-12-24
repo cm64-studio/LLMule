@@ -11,11 +11,13 @@ const { handleLLMRequest } = require('./controllers/llmController');
 const authRoutes = require('./routes/auth'); // Add this line
 const { providerManager } = require('./services/providerManager');
 const { handleModelsList } = require('./controllers/modelController');
+const { getBalance } = require('./controllers/balanceController');
 
 const app = express();
 const server = createServer(app);
 const wss = new WebSocket.Server({ server, path: config.websocket_path });
 
+global.providerManager = providerManager;
 // MongoDB Connection
 mongoose.connect(config.mongodb_uri)
   .then(() => console.log('Connected to MongoDB'))
@@ -42,6 +44,8 @@ app.use('/auth', authRoutes); // Add this line
 app.post('/v1/chat/completions', authenticateApiKey, handleLLMRequest);
 
 app.get('/v1/models', authenticateApiKey, handleModelsList);
+
+app.get('/v1/balance', authenticateApiKey, getBalance);
 
 // Add this route in your server.js, replacing the existing debug endpoint:
 
@@ -152,7 +156,7 @@ server.listen(PORT, HOST, () => {
   console.log(`   - Local:    http://localhost:${PORT}`);
   console.log(`   - Network:  http://${getLocalIP()}:${PORT}`);
   console.log(`\n🔌 WebSocket server path: ${config.websocket_path}`);
-  console.log(`📦 MongoDB URI: ${config.mongodb_uri}`);
+  console.log(`📦 MongoDB connected`);
 });
 
 // Función helper para obtener IP local

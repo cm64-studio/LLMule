@@ -4,13 +4,13 @@ const User = require('../models/userModel');
 const authenticateApiKey = async (req, res, next) => {
   try {
     // Get API key from headers - support both x-api-key and Authorization: Bearer
-    let apiKey = req.headers['x-api-key'];
-    
-    // Check Authorization header (OpenAI style)
-    const authHeader = req.headers['authorization'];
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-      apiKey = authHeader.slice(7); // Remove 'Bearer ' prefix
-    }
+    const authHeader = req.headers.authorization;
+    const apiKey = authHeader?.startsWith('Bearer ') ? 
+                   authHeader.substring(7) : 
+                   req.headers['x-api-key'];
+
+    console.log('Received headers:', req.headers); // Add this for debugging
+    console.log('Extracted API key:', apiKey); // Add this for debugging
 
     if (!apiKey) {
       return res.status(401).json({ 
@@ -22,7 +22,7 @@ const authenticateApiKey = async (req, res, next) => {
     // Find user with this API key
     const user = await User.findOne({ 
       apiKey,
-      emailVerified: true,
+      emailVerified: true, 
       status: 'active'
     });
 
