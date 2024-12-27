@@ -61,6 +61,14 @@ const modelConfig = {
           gpu: '16GB VRAM'
         }
       },
+      'vanilj/Phi-4:latest': {
+        tier: 'large',
+        context: 16384,
+        requirements: {
+          ram: '16GB',
+          gpu: '16GB VRAM'
+        }
+      },
   
       // XL Models (30B+)
       'llama2-70b': {
