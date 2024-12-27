@@ -1,7 +1,8 @@
-// src/models/userModel.js
+// models/userModel.js
 const mongoose = require('mongoose');
 const crypto = require('crypto');
-const { TokenBalance } = require('./TokenBalance');
+const TokenService = require('../services/tokenService');
+const { tokenConfig } = require('../config/tokenomics');
 
 const userSchema = new mongoose.Schema({
   email: {
@@ -27,6 +28,23 @@ const userSchema = new mongoose.Schema({
     enum: ['active', 'suspended'],
     default: 'active'
   },
+  userType: {
+    type: String,
+    enum: ['free', 'pro', 'enterprise'],
+    default: 'free'
+  },
+  provider: {
+    isProvider: {
+      type: Boolean,
+      default: false
+    },
+    models: [{
+      name: String,
+      type: String,
+      tier: String
+    }],
+    lastSeen: Date
+  },
   rateLimits: {
     requests: {
       type: Number,
@@ -41,33 +59,21 @@ const userSchema = new mongoose.Schema({
       default: () => new Date(new Date().setMonth(new Date().getMonth() + 1))
     }
   },
-  userType: {
-    type: String,
-    enum: ['free', 'pro', 'enterprise'],
-    default: 'free'
-  },
   createdAt: {
     type: Date,
     default: Date.now
   }
 });
 
+// Initialize welcome balance for new users
 userSchema.post('save', async function(doc) {
   try {
     if (this.isNew) {
-      console.log('Creating initial token balance for user:', doc._id);
-      const balance = await TokenBalance.findOne({ userId: doc._id });
-      
-      if (!balance) {
-        await TokenBalance.create({
-          userId: doc._id,
-          welcomeBalance: 1000000 // 1M welcome tokens
-        });
-        console.log('Token balance created successfully');
-      }
+      await TokenService.initializeBalance(doc._id);
+      console.log(`Welcome balance created for user ${doc._id}`);
     }
   } catch (error) {
-    console.error('Error creating token balance:', error);
+    console.error('Error creating welcome balance:', error);
   }
 });
 
@@ -77,9 +83,37 @@ userSchema.methods.generateApiKey = function() {
 
 userSchema.methods.generateEmailVerificationToken = function() {
   const token = crypto.randomBytes(32).toString('hex');
-  this.emailVerificationToken = crypto.createHash('sha256').update(token).digest('hex');
-  this.emailVerificationExpires = Date.now() + 24 * 60 * 60 * 1000;
+  this.emailVerificationToken = crypto
+    .createHash('sha256')
+    .update(token)
+    .digest('hex');
+  this.emailVerificationExpires = Date.now() + 24 * 60 * 60 * 1000; // 24 hours
   return token;
+};
+
+// Get user's tier based on usage and balance
+userSchema.methods.getUserTier = async function() {
+  try {
+    const stats = await TokenService.getConsumerStats(this._id, '30d');
+    
+    if (stats.totalSpent > 100) { // Over 100 MULE spent
+      return 'enterprise';
+    } else if (stats.totalSpent > 10) { // Over 10 MULE spent
+      return 'pro';
+    }
+    return 'free';
+  } catch (error) {
+    console.error('Error getting user tier:', error);
+    return this.userType;
+  }
+};
+
+// Add provider capabilities
+userSchema.methods.registerAsProvider = async function(models) {
+  this.provider.isProvider = true;
+  this.provider.models = models;
+  this.provider.lastSeen = new Date();
+  return this.save();
 };
 
 const User = mongoose.model('User', userSchema);

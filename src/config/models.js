@@ -25,6 +25,14 @@ const modelConfig = {
           gpu: false
         }
       },
+      'phi3:mini': {
+        tier: 'small',
+        context: 2048,
+        requirements: {
+          ram: '4GB',
+          gpu: false
+        }
+      },
   
       // Medium Models (7B-13B)
       'mistral-7b': {

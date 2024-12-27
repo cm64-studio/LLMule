@@ -12,6 +12,7 @@ const authRoutes = require('./routes/auth'); // Add this line
 const { providerManager } = require('./services/providerManager');
 const { handleModelsList } = require('./controllers/modelController');
 const { getBalance } = require('./controllers/balanceController');
+const balanceRoutes = require('./routes/balanceRoutes');
 
 const app = express();
 const server = createServer(app);
@@ -40,12 +41,14 @@ app.locals.providerManager = providerManager;
 // Add auth routes
 app.use('/auth', authRoutes); // Add this line
 
+
+
 // API Routes
 app.post('/v1/chat/completions', authenticateApiKey, handleLLMRequest);
 
 app.get('/v1/models', authenticateApiKey, handleModelsList);
 
-app.get('/v1/balance', authenticateApiKey, getBalance);
+app.use('/v1', balanceRoutes);
 
 // Add this route in your server.js, replacing the existing debug endpoint:
 
@@ -104,12 +107,16 @@ wss.on('connection', (ws) => {
   const providerId = uuidv4();
   console.log(`New provider connected: ${providerId}`);
   
-  ws.on('message', (message) => {
+  ws.on('message', async (message) => {
     try {
       const data = JSON.parse(message);
-      handleProviderMessage(ws, providerId, data);
+      await handleProviderMessage(ws, providerId, data);
     } catch (error) {
-      console.error('Invalid message format:', error);
+      console.error('Error handling message:', error);
+      ws.send(JSON.stringify({
+        type: 'error',
+        error: 'Failed to process message'
+      }));
     }
   });
 
@@ -119,30 +126,63 @@ wss.on('connection', (ws) => {
   });
 });
 
-function handleProviderMessage(ws, providerId, data) {
+async function handleProviderMessage(ws, providerId, data) {
   console.log(`Received message from provider ${providerId}:`, data.type);
   
-  switch (data.type) {
-    case 'register':
-      if (!data.models || data.models.length === 0) {
-        console.error('Provider tried to register with no models');
-        return;
-      }
+  try {
+    switch (data.type) {
+      case 'register':
+        if (!data.models || data.models.length === 0 || !data.apiKey) {
+          console.error('Invalid provider registration data');
+          ws.send(JSON.stringify({
+            type: 'error',
+            error: 'Invalid registration data. Required: models and apiKey'
+          }));
+          return;
+        }
 
-      providerManager.registerProvider(providerId, {
-        models: data.models,
-        ws,
-        status: 'active'
-      });
-      break;
-      
-    case 'pong':
-      providerManager.updateProviderStatus(providerId, 'active');
-      break;
-      
-    case 'completion_response':
-      providerManager.handleCompletionResponse(data.requestId, data.response);
-      break;
+        const success = await providerManager.registerProvider(providerId, {
+          models: data.models,
+          ws,
+          apiKey: data.apiKey
+        });
+
+        if (!success) {
+          ws.send(JSON.stringify({
+            type: 'error',
+            error: 'Registration failed. Invalid API key or inactive user'
+          }));
+          ws.close();
+          return;
+        }
+
+        ws.send(JSON.stringify({
+          type: 'registered',
+          message: 'Successfully registered as provider'
+        }));
+        break;
+        
+      case 'pong':
+        providerManager.updateProviderStatus(providerId, 'active');
+        break;
+        
+      case 'completion_response':
+        providerManager.handleCompletionResponse(data.requestId, data.response);
+        break;
+
+      default:
+        console.warn(`Unknown message type: ${data.type}`);
+        ws.send(JSON.stringify({
+          type: 'error',
+          error: 'Unknown message type'
+        }));
+    }
+  } catch (error) {
+    console.error('Error in handleProviderMessage:', error);
+    ws.send(JSON.stringify({
+      type: 'error',
+      error: 'Internal server error'
+    }));
   }
 }
 

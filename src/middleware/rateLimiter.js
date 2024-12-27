@@ -1,18 +1,12 @@
-// src/middleware/rateLimiter.js
-const User = require('../models/userModel');
-const { TokenManager } = require('../services/TokenManager');
+// middleware/rateLimiter.js
+const { TokenCalculator } = require('../config/tokenomics');
+const TokenService = require('../services/tokenService');
+const { ModelManager } = require('../config/models');
 
 const rateLimiter = async (req, res, next) => {
   try {
-    const user = await User.findOne({ apiKey: req.user.apiKey });
+    const user = req.user;
     
-    if (!user) {
-      return res.status(401).json({
-        error: 'Invalid API key',
-        code: 'invalid_api_key'
-      });
-    }
-
     // Check rate limits
     if (user.rateLimits.reset < new Date()) {
       user.rateLimits.requests = user.rateLimits.limit;
@@ -22,29 +16,41 @@ const rateLimiter = async (req, res, next) => {
 
     if (user.rateLimits.requests <= 0) {
       return res.status(429).json({
-        error: 'Rate limit exceeded',
-        code: 'rate_limit_exceeded',
-        reset: user.rateLimits.reset,
-        limit: user.rateLimits.limit
+        error: {
+          message: 'Rate limit exceeded',
+          code: 'rate_limit_exceeded',
+          reset_at: user.rateLimits.reset,
+          limit: user.rateLimits.limit
+        }
       });
     }
 
     // Pre-check token allowance
+    const model = req.body.model || 'small';
     const estimatedTokens = req.body.max_tokens || 4096;
-    const model = req.body.model || 'tinyllama';
+    const modelInfo = ModelManager.getModelInfo(model);
     
-    const allowance = await TokenManager.checkAllowance(
-      user._id,
-      model,
-      estimatedTokens
+    // Convert estimated tokens to MULE
+    const estimatedMules = TokenCalculator.tokensToMules(
+      estimatedTokens,
+      modelInfo.tier
     );
 
-    if (!allowance.allowed) {
+    // Get user balance
+    const balance = await TokenService.getBalance(user._id);
+    
+    if (balance.balance < estimatedMules) {
       return res.status(402).json({
-        error: 'Insufficient token balance',
-        code: 'insufficient_tokens',
-        remaining: allowance.remaining,
-        requested: estimatedTokens
+        error: {
+          message: 'Insufficient MULE balance',
+          code: 'insufficient_balance',
+          available_mules: balance.balance,
+          required_mules: estimatedMules,
+          available_tokens: TokenCalculator.mulesToTokens(
+            balance.balance,
+            modelInfo.tier
+          )
+        }
       });
     }
 
@@ -52,19 +58,14 @@ const rateLimiter = async (req, res, next) => {
     user.rateLimits.requests--;
     await user.save();
     
-    // Add token info to request for later use
-    req.tokenInfo = {
-      userId: user._id,
-      model,
-      estimatedTokens
-    };
-    
     next();
   } catch (error) {
     console.error('Rate limit error:', error);
     res.status(500).json({
-      error: 'Rate limit check failed',
-      code: 'rate_limit_error'
+      error: {
+        message: 'Rate limit check failed',
+        code: 'rate_limit_error'
+      }
     });
   }
 };

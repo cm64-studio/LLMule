@@ -1,49 +1,113 @@
-// src/services/providerManager.js
 const { v4: uuidv4 } = require('uuid');
+const User = require('../models/userModel');
 
 class ProviderManager {
   constructor() {
     this.providers = new Map();
     this.pendingRequests = new Map();
     this.requestCounts = new Map();
-    console.log('ProviderManager initialized with load balancing');
-    this.startHealthCheck();
+    this.providerUserIds = new Map();
+    this.heartbeatInterval = 15000; // 15s
+    this.timeoutThreshold = 45000; // 45s
+    console.log('ProviderManager initialized with heartbeat monitoring');
+    this.startHeartbeatMonitor();
   }
 
-  registerProvider(providerId, providerInfo) {
+  startHeartbeatMonitor() {
+    setInterval(() => {
+      const now = Date.now();
+      for (const [socketId, provider] of this.providers) {
+        const ws = provider.ws;
+
+        if (!ws.isAlive) {
+          console.log(`Provider ${socketId} connection lost - removing`);
+          this.removeProvider(socketId);
+          continue;
+        }
+
+        if (now - provider.lastHeartbeat > this.timeoutThreshold) {
+          provider.status = 'inactive';
+          this.requestCounts.set(socketId, 0);
+          console.log(`Provider ${socketId} marked inactive due to timeout`);
+          continue;
+        }
+
+        ws.isAlive = false;
+        ws.ping();
+      }
+    }, this.heartbeatInterval);
+  }
+
+  handleConnection(ws, providerId) {
+    ws.isAlive = true;
+    ws.lastHeartbeat = Date.now();
+    
+    ws.on('pong', () => {
+      ws.isAlive = true;
+      ws.lastHeartbeat = Date.now();
+      this.updateProviderStatus(providerId, 'active');
+    });
+  }
+
+  async registerProvider(socketId, providerInfo) {
     console.log('\n=== Provider Registration ===');
-    console.log('Registering provider:', {
-      providerId,
-      models: providerInfo.models,
-      status: providerInfo.status
-    });
+    console.log('Registering provider:', { socketId, models: providerInfo.models });
     
-    this.providers.set(providerId, {
-      ...providerInfo,
-      lastSeen: Date.now()
-    });
-    
-    // Initialize request count for new provider
-    this.requestCounts.set(providerId, 0);
+    try {
+      let userId = null;
+      if (providerInfo.apiKey) {
+        const user = await User.findOne({ 
+          apiKey: providerInfo.apiKey,
+          emailVerified: true,
+          status: 'active'
+        });
 
+        if (user) {
+          userId = user._id;
+          await user.registerAsProvider(providerInfo.models);
+          this.providerUserIds.set(socketId, userId);
+        }
+      }
+
+      this.providers.set(socketId, {
+        ...providerInfo,
+        userId,
+        lastHeartbeat: Date.now(),
+        status: 'active'
+      });
+      
+      this.requestCounts.set(socketId, 0);
+      this.handleConnection(providerInfo.ws, socketId);
+
+      console.log('Provider registered:', {
+        socketId,
+        userId: userId ? userId.toString() : 'anonymous',
+        models: providerInfo.models
+      });
+
+      this.logProvidersState();
+      return true;
+
+    } catch (error) {
+      console.error('Provider registration failed:', error);
+      return false;
+    }
+  }
+
+  removeProvider(socketId) {
+    console.log(`Removing provider: ${socketId}`);
+    this.providers.delete(socketId);
+    this.providerUserIds.delete(socketId);
+    this.requestCounts.delete(socketId);
     this.logProvidersState();
   }
 
-  removeProvider(providerId) {
-    console.log(`Removing provider: ${providerId}`);
-    this.providers.delete(providerId);
-    this.requestCounts.delete(providerId);
-    this.logProvidersState();
-  }
-
-  updateProviderStatus(providerId, status) {
-    const provider = this.providers.get(providerId);
+  updateProviderStatus(socketId, status) {
+    const provider = this.providers.get(socketId);
     if (provider) {
       provider.status = status;
-      provider.lastSeen = Date.now();
-      console.log(`Provider ${providerId} status updated to: ${status}`);
-    } else {
-      console.log(`Provider ${providerId} not found for status update`);
+      provider.lastHeartbeat = Date.now();
+      console.log(`Provider ${socketId} status updated to: ${status}`);
     }
   }
 
@@ -62,23 +126,24 @@ class ProviderManager {
       return null;
     }
 
-    // Load balancing logic
-    const providersByLoad = eligibleProviders.map(([id, provider]) => ({
-      id,
-      provider,
-      load: this.requestCounts.get(id) || 0
-    })).sort((a, b) => a.load - b.load);
+    const providersByLoad = eligibleProviders
+      .map(([socketId, provider]) => ({
+        socketId,
+        provider,
+        load: this.requestCounts.get(socketId) || 0
+      }))
+      .sort((a, b) => a.load - b.load);
 
     const selected = providersByLoad[0];
-    this.requestCounts.set(selected.id, (this.requestCounts.get(selected.id) || 0) + 1);
+    this.requestCounts.set(selected.socketId, 
+      (this.requestCounts.get(selected.socketId) || 0) + 1
+    );
 
-    console.log('Selected provider:', {
-      id: selected.id,
-      currentLoad: selected.load,
-      totalProviders: eligibleProviders.length
-    });
-
-    return { id: selected.id, provider: selected.provider };
+    return {
+      socketId: selected.socketId,
+      provider: selected.provider,
+      userId: selected.provider.userId
+    };
   }
 
   async routeRequest(requestData) {
@@ -93,8 +158,8 @@ class ProviderManager {
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pendingRequests.delete(requestId);
-        const currentCount = this.requestCounts.get(providerInfo.id) || 1;
-        this.requestCounts.set(providerInfo.id, currentCount - 1);
+        const currentCount = this.requestCounts.get(providerInfo.socketId) || 1;
+        this.requestCounts.set(providerInfo.socketId, currentCount - 1);
         reject(new Error('Request timeout after 5 minutes'));
       }, 300000);
 
@@ -102,15 +167,14 @@ class ProviderManager {
         resolve, 
         reject, 
         timeout,
-        providerId: providerInfo.id
+        socketId: providerInfo.socketId,
+        providerId: providerInfo.provider.userId
       });
       
       providerInfo.provider.ws.send(JSON.stringify({
         type: 'completion_request',
         requestId,
-        ...requestData,
-        temperature: requestData.temperature || 0.7,
-        max_tokens: requestData.max_tokens || 4096
+        ...requestData
       }));
     });
   }
@@ -118,7 +182,6 @@ class ProviderManager {
   handleCompletionResponse(requestId, response) {
     console.log('\n=== Handling Completion Response ===');
     console.log('Request ID:', requestId);
-    console.log('Response:', JSON.stringify(response, null, 2));
 
     const pendingRequest = this.pendingRequests.get(requestId);
     if (!pendingRequest) {
@@ -127,24 +190,20 @@ class ProviderManager {
     }
 
     try {
-      // Cleanup
       clearTimeout(pendingRequest.timeout);
       this.pendingRequests.delete(requestId);
 
-      // Update request count
-      if (pendingRequest.providerId) {
-        const currentCount = this.requestCounts.get(pendingRequest.providerId) || 1;
-        this.requestCounts.set(pendingRequest.providerId, currentCount - 1);
+      if (pendingRequest.socketId) {
+        const currentCount = this.requestCounts.get(pendingRequest.socketId) || 1;
+        this.requestCounts.set(pendingRequest.socketId, currentCount - 1);
       }
 
-      // Handle error responses
       if (response.error) {
         console.error('Error in provider response:', response.error);
         pendingRequest.reject(new Error(response.error));
         return;
       }
 
-      // Validate response structure
       if (!response.choices || !response.choices[0]?.message?.content) {
         console.error('Invalid response structure:', response);
         pendingRequest.reject(new Error('Invalid response from provider'));
@@ -160,50 +219,16 @@ class ProviderManager {
     }
   }
 
-  startHealthCheck() {
-    setInterval(() => {
-      const now = Date.now();
-      for (const [id, provider] of this.providers) {
-        if (now - provider.lastSeen > 30000) {
-          provider.status = 'inactive';
-          // Reset request count for inactive providers
-          this.requestCounts.set(id, 0);
-          console.log(`Provider ${id} marked inactive due to timeout`);
-        }
-        if (provider.status === 'active') {
-          provider.ws.send(JSON.stringify({ type: 'ping' }));
-        }
-      }
-    }, 15000);
-  }
-
   logProvidersState() {
-    const { ModelManager } = require('../config/models');
-    
     console.log('\n=== Current Providers State ===');
     console.log('Total providers:', this.providers.size);
     
     for (const [id, provider] of this.providers) {
-      const modelDetails = provider.models.map(model => {
-        const info = ModelManager.getModelInfo(model) || {
-          tier: model.toLowerCase().includes('mistral') ? 'medium' : 'unknown',
-          requirements: model.toLowerCase().includes('mistral') ? {
-            ram: '8GB',
-            gpu: '8GB VRAM'
-          } : {}
-        };
-        
-        return {
-          name: model,
-          tier: info.tier,
-          requirements: info.requirements
-        };
-      });
-  
       console.log(`- Provider ${id}:`, {
         status: provider.status,
-        models: modelDetails,
-        lastSeen: new Date(provider.lastSeen).toISOString(),
+        userId: provider.userId ? provider.userId.toString() : 'anonymous',
+        models: provider.models,
+        lastHeartbeat: new Date(provider.lastHeartbeat).toISOString(),
         hasWebSocket: !!provider.ws,
         currentLoad: this.requestCounts.get(id) || 0
       });
@@ -214,9 +239,10 @@ class ProviderManager {
   getProvidersInfo() {
     return Array.from(this.providers.entries()).map(([id, provider]) => ({
       id,
+      userId: provider.userId ? provider.userId.toString() : 'anonymous',
       models: provider.models || [],
       status: provider.status || 'unknown',
-      lastSeen: provider.lastSeen ? new Date(provider.lastSeen).toISOString() : null,
+      lastHeartbeat: provider.lastHeartbeat ? new Date(provider.lastHeartbeat).toISOString() : null,
       hasWebSocket: !!provider.ws,
       currentLoad: this.requestCounts.get(id) || 0
     }));

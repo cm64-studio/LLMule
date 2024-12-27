@@ -1,9 +1,9 @@
 // scripts/manageTokens.js
 const mongoose = require('mongoose');
 const { program } = require('commander');
-const { TokenManager } = require('../services/TokenManager');
-const User = require('../models/userModel');
-const config = require('../config');
+const { TokenManager } = require('../src/services/TokenManager');
+const User = require('../src/models/userModel');
+const config = require('../src/config');
 
 program
   .version('1.0.0')

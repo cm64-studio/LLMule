@@ -1,7 +1,8 @@
-// llmController.js
+// controllers/llmController.js
 const { ModelManager } = require('../config/models');
 const { providerManager } = require('../services/providerManager');
-const { TokenTrackingService } = require('../services/tokenTrackingService');
+const TokenService = require('../services/tokenService');
+const { TokenCalculator } = require('../config/tokenomics');
 
 const handleLLMRequest = async (req, res) => {
   try {
@@ -53,7 +54,7 @@ const handleLLMRequest = async (req, res) => {
           }
         });
       }
-      selectedProvider = provider.id;
+      selectedProvider = provider.userId; // Now using MongoDB ObjectId
     }
 
     const modelInfo = ModelManager.getModelInfo(selectedModel);
@@ -67,14 +68,30 @@ const handleLLMRequest = async (req, res) => {
 
     const response = await providerManager.routeRequest(requestData);
     
-    // Log token usage with provider information
-    if (response.usage) {
-      await TokenTrackingService.logUsage({
+    // Validate and normalize usage data
+    const usage = {
+      prompt_tokens: response.usage?.prompt_tokens || 0,
+      completion_tokens: response.usage?.completion_tokens || 0,
+      total_tokens: response.usage?.total_tokens || 0
+    };
+
+    // Ensure total_tokens is calculated if missing
+    if (usage.total_tokens === 0) {
+      usage.total_tokens = usage.prompt_tokens + usage.completion_tokens;
+    }
+
+    // Only process usage if we have valid token counts
+    if (usage.total_tokens > 0) {
+      await TokenService.processUsage({
         consumerId: req.user._id,
         providerId: selectedProvider,
         model: selectedModel,
-        usage: response.usage
+        modelType: modelInfo.type || 'llm',
+        modelTier: modelInfo.tier,
+        rawAmount: usage.total_tokens
       });
+    } else {
+      console.warn('No valid token usage data received from provider');
     }
 
     const formattedResponse = {
@@ -93,7 +110,13 @@ const handleLLMRequest = async (req, res) => {
         },
         finish_reason: choice.finish_reason || 'stop'
       })) || [],
-      usage: response.usage
+      usage: {
+        ...usage,
+        mule_amount: TokenCalculator.tokensToMules(
+          usage.total_tokens,
+          modelInfo.tier
+        )
+      }
     };
 
     res.json(formattedResponse);
