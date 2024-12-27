@@ -105,9 +105,11 @@ class ProviderManager {
   updateProviderStatus(socketId, status) {
     const provider = this.providers.get(socketId);
     if (provider) {
-      provider.status = status;
+      if (provider.status !== status) {
+        console.log(`Provider ${socketId} status changed from ${provider.status} to: ${status}`);
+        provider.status = status;
+      }
       provider.lastHeartbeat = Date.now();
-      console.log(`Provider ${socketId} status updated to: ${status}`);
     }
   }
 
