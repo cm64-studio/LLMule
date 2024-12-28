@@ -143,7 +143,6 @@ const modelConfig = {
   }
 };
 
-// src/config/models.js
 class ModelManager {
   static getModelInfo(modelName) {
     console.log('Getting model info for:', modelName);
@@ -155,37 +154,50 @@ class ModelManager {
 
     if (!normalizedName) {
       console.warn('Invalid model name:', modelName);
-      return this._createModelInfo('medium'); // Safe default
+      return ModelManager.createModelInfo('medium'); // Changed to static call
     }
 
     // Handle vanilj/phi-4 specifically
     if (normalizedName.includes('phi-4')) {
-      return this._createModelInfo('large');
+      return ModelManager.createModelInfo('large'); // Changed to static call
     }
 
-    // Rest of your existing pattern matching...
-    for (const [family, config] of Object.entries(modelConfig.modelFamilies)) {
-      if (normalizedName.includes(family)) {
-        if (typeof config === 'object') {
-          for (const [version, tier] of Object.entries(config)) {
-            if (normalizedName.includes(version)) {
-              return this._createModelInfo(tier);
-            }
-          }
-        } else {
-          return this._createModelInfo(config);
+    // Try pattern matching for size
+    for (const [tier, patterns] of Object.entries(modelConfig.sizePatterns)) {
+      for (const pattern of patterns) {
+        if (pattern.test(normalizedName)) {
+          return ModelManager.createModelInfo(tier); // Changed to static call
         }
       }
     }
 
-    // Add debug logging
-    console.log('Model classification result:', {
-      name: normalizedName,
-      patterns: modelConfig.sizePatterns.large
-        .map(p => ({ pattern: p.toString(), matches: p.test(normalizedName) }))
-    });
+    console.warn(`Unrecognized model pattern: ${modelName}`);
+    return ModelManager.createModelInfo('medium'); // Changed to static call
+  }
 
-    return this._createModelInfo('medium'); // Safe default
+  // Changed to static method and renamed without underscore
+  static createModelInfo(tier) {
+    // Create standard model info based on tier
+    const requirements = {
+      small: { ram: '4GB', gpu: false },
+      medium: { ram: '8GB', gpu: '8GB VRAM' },
+      large: { ram: '16GB', gpu: '16GB VRAM' },
+      xl: { ram: '32GB', gpu: '32GB VRAM' }
+    };
+
+    const contexts = {
+      small: 4096,
+      medium: 8192,
+      large: 32768,
+      xl: 32768
+    };
+
+    return {
+      tier,
+      context: contexts[tier] || 8192,
+      requirements: requirements[tier] || requirements.medium,
+      type: 'llm'
+    };
   }
 }
 
