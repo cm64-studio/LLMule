@@ -8,8 +8,8 @@ class ProviderManager {
     this.pendingRequests = new Map();
     this.requestCounts = new Map();
     this.providerUserIds = new Map();
-    this.heartbeatInterval = 15000; // 15s
-    this.timeoutThreshold = 45000; // 45s
+    this.heartbeatInterval = 15000; 
+    this.timeoutThreshold = 45000;
     console.log('ProviderManager initialized with heartbeat monitoring');
     this.startHeartbeatMonitor();
   }
@@ -61,6 +61,34 @@ class ProviderManager {
     
     try {
       let userId = null;
+      let formattedModels = [];  // Move declaration outside
+
+      // Format and normalize model names regardless of user authentication
+      formattedModels = providerInfo.models.map(model => {
+        console.log('Processing model:', model);
+        const modelInfo = ModelManager.getModelInfo(model);
+        console.log('Model classification:', {
+          name: model,
+          info: modelInfo
+        });
+
+        // If it's already an object, use it
+        if (typeof model === 'object') {
+          return {
+            name: model.name,
+            type: model.type || 'llm',
+            tier: modelInfo?.tier || 'medium'
+          };
+        }
+        // If it's a string, create an object
+        return {
+          name: model,
+          type: 'llm',
+          tier: modelInfo?.tier || 'medium'
+        };
+      });
+
+      // Handle authenticated users
       if (providerInfo.apiKey) {
         const user = await User.findOne({ 
           apiKey: providerInfo.apiKey,
@@ -78,31 +106,6 @@ class ProviderManager {
         if (user) {
           userId = user._id;
           
-          // Format and normalize model names
-          const formattedModels = providerInfo.models.map(model => {
-            console.log('Processing model:', model);
-            const modelInfo = ModelManager.getModelInfo(model);
-            console.log('Model classification:', {
-              name: model,
-              info: modelInfo
-            });
-
-            // If it's already an object, use it
-            if (typeof model === 'object') {
-              return {
-                name: model.name,
-                type: model.type || 'llm',
-                tier: modelInfo?.tier || 'medium'
-              };
-            }
-            // If it's a string, create an object
-            return {
-              name: model,
-              type: 'llm',
-              tier: modelInfo?.tier || 'medium'
-            };
-          });
-  
           console.log('Formatted models:', formattedModels);
   
           // Update user's provider status
@@ -133,7 +136,7 @@ class ProviderManager {
       // Store provider information with formatted models
       const providerData = {
         ...providerInfo,
-        models: formattedModels || providerInfo.models, // Use formatted if available
+        models: formattedModels, // Use formatted models for all providers
         userId,
         lastHeartbeat: Date.now(),
         status: 'active',
@@ -151,8 +154,8 @@ class ProviderManager {
       console.log('Provider registration complete:', {
         socketId,
         userId: userId?.toString(),
-        modelCount: providerData.models.length,
-        models: providerData.models,
+        modelCount: formattedModels.length,
+        models: formattedModels,
         status: 'active'
       });
 
