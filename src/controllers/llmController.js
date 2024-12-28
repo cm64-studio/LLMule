@@ -90,30 +90,52 @@ const handleLLMRequest = async (req, res) => {
 async function selectModelAndProvider(requestedModel) {
   console.log('Finding provider for model:', requestedModel);
 
+  const providers = providerManager.getProvidersInfo();
+  console.log('Available providers:', providers.map(p => ({
+    id: p.id,
+    status: p.status,
+    modelCount: p.models.length,
+    models: p.models.map(m => ({
+      name: typeof m === 'object' ? m.name : m,
+      tier: ModelManager.getModelInfo(m).tier
+    }))
+  })));
+
   if (['small', 'medium', 'large', 'xl'].includes(requestedModel)) {
-    const providers = providerManager.getProvidersInfo();
     const availableModels = providers
       .filter(p => p.status === 'active')
-      .map(provider => ({
-        provider: provider.id,
-        models: provider.models.filter(model => {
-          // Normalize model info
-          const modelName = typeof model === 'object' ? model.name : model;
-          const info = ModelManager.getModelInfo(modelName);
-          console.log('Provider model check:', {
-            model: modelName,
+      .map(provider => {
+        const matchingModels = provider.models.filter(model => {
+          const info = ModelManager.getModelInfo(model);
+          console.log('Model tier check:', {
+            model: typeof model === 'object' ? model.name : model,
             tier: info?.tier,
-            requestedTier: requestedModel
+            requestedTier: requestedModel,
+            matches: info?.tier === requestedModel
           });
           return info?.tier === requestedModel;
-        })
-      }))
+        });
+        
+        return {
+          provider: provider.id,
+          models: matchingModels
+        };
+      })
       .filter(p => p.models.length > 0);
-      
+
+    // More detailed logging
+    console.log('Models by tier:', {
+      requestedTier: requestedModel,
+      availableProviders: availableModels.length,
+      models: availableModels.map(p => ({
+        providerId: p.provider,
+        models: p.models
+      }))
+    });
+
     if (availableModels.length === 0) {
-      // Enhanced error object
-      const error = new Error("No models available");
-      error.code = "NO_MODELS_AVAILABLE";
+      const error = new Error('No models available');
+      error.code = 'NO_MODELS_AVAILABLE';
       error.tier = requestedModel;
       throw error;
     }
