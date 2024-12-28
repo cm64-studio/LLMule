@@ -188,6 +188,8 @@ async function logUsage({ consumerId, providerId, model, modelInfo, usage, timin
     validatedUsage.total_tokens = validatedUsage.prompt_tokens + validatedUsage.completion_tokens;
   }
 
+  // Get model name from object if needed
+  const modelName = typeof model === 'object' ? model.name : model;
   const muleAmount = TokenCalculator.tokensToMules(validatedUsage.total_tokens, modelInfo.tier);
   console.log('Calculated MULE amount:', muleAmount);
 
@@ -206,7 +208,7 @@ async function logUsage({ consumerId, providerId, model, modelInfo, usage, timin
       if (validatedUsage.total_tokens > 0) {
         await TokenService.processUsage({
           consumerId,
-          model,
+          model: modelName, // Use string model name
           modelType: modelInfo.type || 'llm',
           modelTier: modelInfo.tier,
           rawAmount: validatedUsage.total_tokens,
@@ -217,7 +219,7 @@ async function logUsage({ consumerId, providerId, model, modelInfo, usage, timin
       const usageLog = await UsageLog.create({
         consumerId,
         providerId: new mongoose.Types.ObjectId(providerIdString),
-        model,
+        model: modelName, // Use string model name
         modelTier: modelInfo.tier,
         tokensUsed: validatedUsage.total_tokens,
         promptTokens: validatedUsage.prompt_tokens,
@@ -234,7 +236,7 @@ async function logUsage({ consumerId, providerId, model, modelInfo, usage, timin
         await TokenService.processUsage({
           consumerId,
           providerId: new mongoose.Types.ObjectId(providerIdString),
-          model,
+          model: modelName, // Use string model name
           modelType: modelInfo.type || 'llm',
           modelTier: modelInfo.tier,
           rawAmount: validatedUsage.total_tokens

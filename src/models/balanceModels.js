@@ -30,7 +30,7 @@ const transactionSchema = new mongoose.Schema({
   },
   transactionType: {
     type: String,
-    enum: ['consumption', 'provision', 'self_service', 'deposit', 'withdrawal'],
+    enum: ['consumption', 'provision', 'self_service', 'deposit', 'withdrawal', 'consumption_anonymous'],
     required: true
   },
   consumerId: {
