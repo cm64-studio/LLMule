@@ -143,52 +143,68 @@ const modelConfig = {
   }
 };
 
+// src/config/models.js
+
 class ModelManager {
   static getModelInfo(modelName) {
-    // First try exact match
-    if (modelConfig.models[modelName]) {
-      return modelConfig.models[modelName];
+    console.log('Getting model info for:', modelName);
+    
+    // Handle cases where modelName is an object
+    if (typeof modelName === 'object') {
+      if (modelName.name) {
+        modelName = modelName.name;
+      } else {
+        console.warn('Invalid model object:', modelName);
+        return this._createModelInfo('medium'); // Safe default
+      }
     }
 
-    // Normalize the model name
-    const normalizedName = modelName.toLowerCase();
+    // Now we can safely use string methods
+    try {
+      const normalizedName = modelName.toLowerCase();
 
-    // Try to identify model family
-    for (const [family, config] of Object.entries(modelConfig.modelFamilies)) {
-      if (normalizedName.includes(family)) {
-        // If family has specific versions
-        if (typeof config === 'object') {
-          for (const [version, tier] of Object.entries(config)) {
-            if (normalizedName.includes(version)) {
-              return this._createModelInfo(tier);
+      // Try to identify model family
+      for (const [family, config] of Object.entries(modelConfig.modelFamilies)) {
+        if (normalizedName.includes(family)) {
+          // If family has specific versions
+          if (typeof config === 'object') {
+            for (const [version, tier] of Object.entries(config)) {
+              if (normalizedName.includes(version)) {
+                return this._createModelInfo(tier);
+              }
             }
+          } else {
+            // Family has fixed tier
+            return this._createModelInfo(config);
           }
-        } else {
-          // Family has fixed tier
-          return this._createModelInfo(config);
         }
       }
-    }
 
-    // Try pattern matching for size
-    for (const [tier, patterns] of Object.entries(modelConfig.sizePatterns)) {
-      for (const pattern of patterns) {
-        if (pattern.test(normalizedName)) {
-          return this._createModelInfo(tier);
+      // Try pattern matching for size
+      for (const [tier, patterns] of Object.entries(modelConfig.sizePatterns)) {
+        for (const pattern of patterns) {
+          if (pattern.test(normalizedName)) {
+            return this._createModelInfo(tier);
+          }
         }
       }
-    }
 
-    // Default to medium if contains common LLM names
-    if (normalizedName.includes('llm') || 
-        normalizedName.includes('hermes') ||
-        normalizedName.includes('neural')) {
-      return this._createModelInfo('medium');
-    }
+      // Default to medium if contains common LLM names
+      if (normalizedName.includes('llm') || 
+          normalizedName.includes('hermes') ||
+          normalizedName.includes('neural')) {
+        return this._createModelInfo('medium');
+      }
 
-    // Log unrecognized model for future pattern updates
-    console.warn(`Unrecognized model pattern: ${modelName}`);
-    return this._createModelInfo('medium'); // Safe default
+      console.warn(`Unrecognized model pattern: ${modelName}`);
+      return this._createModelInfo('medium'); // Safe default
+    } catch (error) {
+      console.error('Error processing model name:', {
+        modelName,
+        error: error.message
+      });
+      return this._createModelInfo('medium'); // Safe default
+    }
   }
 
   static _createModelInfo(tier) {
