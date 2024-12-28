@@ -3,16 +3,15 @@ const User = require('../models/userModel');
 
 const authenticateApiKey = async (req, res, next) => {
   try {
-    // Get API key from headers - support both x-api-key and Authorization: Bearer
-    const authHeader = req.headers.authorization;
-    const apiKey = authHeader?.startsWith('Bearer ') ? 
-                   authHeader.substring(7) : 
-                   req.headers['x-api-key'];
+    const apiKey = req.headers['x-api-key'] || 
+                  (req.headers.authorization?.startsWith('Bearer ') ? 
+                   req.headers.authorization.substring(7) : null);
 
     console.log('Auth debug:', {
       headers: req.headers,
-      authHeader,
-      extractedApiKey: apiKey
+      extractedApiKey: apiKey ? `${apiKey.substring(0, 10)}...` : null,
+      authMethod: req.headers['x-api-key'] ? 'x-api-key' : 
+                 req.headers.authorization ? 'bearer' : 'none'
     });
 
     if (!apiKey) {
