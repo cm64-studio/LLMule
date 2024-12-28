@@ -218,7 +218,8 @@ class ProviderManager {
         const hasModel = provider.models.some(providerModel => {
           // Get model info for both requested and provider model
           const requestedInfo = ModelManager.getModelInfo(model);
-          const providerInfo = ModelManager.getModelInfo(providerModel);
+          const providerModelName = providerModel.name || providerModel;
+          const providerInfo = ModelManager.getModelInfo(providerModelName);
           
           console.log('Model comparison:', {
             requested: {
@@ -226,13 +227,13 @@ class ProviderManager {
               tier: requestedInfo?.tier
             },
             provider: {
-              name: providerModel,
+              name: providerModelName,
               tier: providerInfo?.tier
             }
           });
 
           // Match by exact name or matching tier
-          return providerModel === model || 
+          return providerModelName === model || 
                  (requestedInfo?.tier && requestedInfo.tier === providerInfo?.tier);
         });
 
@@ -270,16 +271,25 @@ class ProviderManager {
       (this.requestCounts.get(selected.socketId) || 0) + 1
     );
 
+    // Find the actual matching model to return
+    const selectedModel = selected.provider.models.find(m => {
+      const mName = m.name || m;
+      return mName === model || 
+             ModelManager.getModelInfo(mName).tier === ModelManager.getModelInfo(model).tier;
+    });
+
     console.log('Selected provider:', {
       socketId: selected.socketId.substring(0, 8),
       currentLoad: this.requestCounts.get(selected.socketId),
-      selectedModels: selected.provider.models
+      selectedModel: selectedModel?.name || selectedModel,
+      availableModels: selected.provider.models.map(m => m.name || m)
     });
 
     return {
       socketId: selected.socketId,
       provider: selected.provider,
-      userId: selected.provider.userId
+      userId: selected.provider.userId,
+      selectedModel: selectedModel?.name || selectedModel // Return just the model name
     };
   }
 
@@ -290,6 +300,12 @@ class ProviderManager {
 
     if (!providerInfo) {
       throw new Error('No available providers');
+    }
+
+    // Use the actual selected model name for the request
+    const actualModelName = providerInfo.selectedModel;
+    if (!actualModelName) {
+      throw new Error('No matching model found');
     }
 
     const requestId = uuidv4();
@@ -309,11 +325,19 @@ class ProviderManager {
         providerId: providerInfo.provider.userId
       });
 
+      // Use the actual model name in the request
       providerInfo.provider.ws.send(JSON.stringify({
         type: 'completion_request',
         requestId,
-        ...requestData
+        ...requestData,
+        model: actualModelName // Override with actual model name
       }));
+
+      console.log('Sent completion request:', {
+        requestId,
+        model: actualModelName,
+        originalModel: requestData.model
+      });
     });
   }
 
