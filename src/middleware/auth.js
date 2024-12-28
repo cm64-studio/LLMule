@@ -21,39 +21,30 @@ const authenticateApiKey = async (req, res, next) => {
       });
     }
 
-    // Find user with this API key
-    const user = await User.findOne({ 
-      apiKey,
-      emailVerified: true, 
-      status: 'active'
-    });
+   // Find user with this API key
+   const user = await User.findOne({ 
+    apiKey,
+    emailVerified: true, 
+    status: 'active'
+  });
 
-    console.log('Auth user lookup result:', {
-      apiKeyProvided: apiKey,
-      userFound: !!user,
-      userId: user?._id?.toString(),
-      userStatus: user?.status,
-      emailVerified: user?.emailVerified
-    });
-
-    if (!user) {
-      return res.status(401).json({ 
-        error: 'Authentication failed',
-        message: 'Invalid API key'
-      });
-    }
-
-    // Add user to request object for use in later middleware
-    req.user = user;
-    next();
-
-  } catch (error) {
-    console.error('Auth error:', error);
-    res.status(500).json({ 
-      error: 'Authentication error',
-      message: 'An error occurred during authentication'
+  if (!user) {
+    return res.status(401).json({ 
+      error: 'Authentication failed',
+      message: 'Invalid API key'
     });
   }
+
+  req.user = user;
+  next();
+
+} catch (error) {
+  console.error('Auth error:', error);
+  res.status(500).json({ 
+    error: 'Authentication error',
+    message: 'An error occurred during authentication'
+  });
+}
 };
 
 module.exports = { authenticateApiKey };
