@@ -133,7 +133,11 @@ async function handleProviderMessage(ws, providerId, data) {
     switch (data.type) {
       case 'register':
         if (!data.models || data.models.length === 0 || !data.apiKey) {
-          console.error('Invalid provider registration data');
+          console.error('Invalid provider registration data:', {
+            hasModels: !!data.models,
+            modelCount: data.models?.length,
+            hasApiKey: !!data.apiKey
+          });
           ws.send(JSON.stringify({
             type: 'error',
             error: 'Invalid registration data. Required: models and apiKey'
@@ -141,13 +145,22 @@ async function handleProviderMessage(ws, providerId, data) {
           return;
         }
 
-        const success = await providerManager.registerProvider(providerId, {
+        // Include userId in registration if available
+        const registrationData = {
           models: data.models,
           ws,
           apiKey: data.apiKey
-        });
+        };
+
+        if (data.userId) {
+          console.log('Including userId in registration:', data.userId);
+          registrationData.userId = data.userId;
+        }
+
+        const success = await providerManager.registerProvider(providerId, registrationData);
 
         if (!success) {
+          console.error('Provider registration failed');
           ws.send(JSON.stringify({
             type: 'error',
             error: 'Registration failed. Invalid API key or inactive user'
@@ -156,6 +169,7 @@ async function handleProviderMessage(ws, providerId, data) {
           return;
         }
 
+        console.log('Provider registered successfully:', providerId);
         ws.send(JSON.stringify({
           type: 'registered',
           message: 'Successfully registered as provider'

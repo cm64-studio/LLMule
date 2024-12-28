@@ -102,61 +102,92 @@ class TokenService {
         model,
         modelType,
         modelTier,
-        rawAmount
-    }) {
+        rawAmount,
+        isAnonymous = false
+      }) {
         try {
-            // Calculate MULE amount and fees
-            const muleAmount = TokenCalculator.tokensToMules(rawAmount, modelTier);
-            const platformFee = muleAmount * tokenConfig.fees.platform_fee;
-            const providerAmount = muleAmount - platformFee;
-
-            // Create transaction record
-            const transaction = {
-                timestamp: new Date(),
-                transactionType: consumerId && providerId && consumerId.toString() === providerId.toString()
-                    ? 'self_service'
-                    : 'consumption',
-                consumerId: consumerId,
-                model,
-                modelType,
-                modelTier,
-                rawAmount,
-                muleAmount: TokenCalculator.formatMules(muleAmount),
-                platformFee: TokenCalculator.formatMules(platformFee)
-            };
-
-            // Only add providerId if it exists
-            if (providerId) {
-                transaction.providerId = providerId;
-            }
-
-            const savedTransaction = await Transaction.create(transaction);
-
-            // Update consumer balance if we have a consumer ID
-            if (consumerId) {
-                const consumerBalance = await Balance.findOneAndUpdate(
-                    { userId: consumerId },
-                    {
-                        $inc: { balance: -muleAmount },
-                        $set: { lastUpdated: new Date() }
-                    },
-                    { new: true }
-                );
-
-                if (!consumerBalance || consumerBalance.balance < 0) {
-                    await Transaction.findByIdAndDelete(savedTransaction._id);
-                    throw new Error('Insufficient balance');
-                }
-            }
-
-            // Handle provider balance update
-            await this._handleProviderBalance(providerId, providerAmount);
-
-            return savedTransaction;
-
+          // Calculate MULE amount and fees
+          const muleAmount = TokenCalculator.tokensToMules(rawAmount, modelTier);
+          const platformFee = muleAmount * tokenConfig.fees.platform_fee;
+          const providerAmount = muleAmount - platformFee;
+      
+          // Check if this is self-service (same user)
+          const isSelfService = providerId && 
+            consumerId.toString() === providerId.toString();
+      
+          console.log('Processing usage:', {
+            consumerId: consumerId.toString(),
+            providerId: providerId?.toString(),
+            isSelfService,
+            muleAmount,
+            platformFee
+          });
+      
+          // For self-service, we don't charge
+          if (isSelfService) {
+            console.log('Self-service request - no charge');
+            return await Transaction.create({
+              timestamp: new Date(),
+              transactionType: 'self_service',
+              consumerId,
+              providerId,
+              model,
+              modelType,
+              modelTier,
+              rawAmount,
+              muleAmount: TokenCalculator.formatMules(muleAmount),
+              platformFee: 0,
+              metadata: { self_service: true }
+            });
+          }
+      
+          // For regular service, check balance and charge
+          const consumerBalance = await Balance.findOne({ userId: consumerId });
+          if (!consumerBalance || consumerBalance.balance < muleAmount) {
+            throw new Error('Insufficient balance');
+          }
+      
+          // Create transaction
+          const transaction = await Transaction.create({
+            timestamp: new Date(),
+            transactionType: isAnonymous ? 'consumption_anonymous' : 'consumption',
+            consumerId,
+            providerId,
+            model,
+            modelType,
+            modelTier,
+            rawAmount,
+            muleAmount: TokenCalculator.formatMules(muleAmount),
+            platformFee: TokenCalculator.formatMules(platformFee)
+          });
+      
+          // Update balances
+          await Promise.all([
+            // Deduct from consumer
+            Balance.findOneAndUpdate(
+              { userId: consumerId },
+              {
+                $inc: { balance: -muleAmount },
+                $set: { lastUpdated: new Date() }
+              }
+            ),
+            // Add to provider if not anonymous
+            !isAnonymous && providerId ? 
+              Balance.findOneAndUpdate(
+                { userId: providerId },
+                {
+                  $inc: { balance: providerAmount },
+                  $set: { lastUpdated: new Date() }
+                },
+                { upsert: true }
+              ) : Promise.resolve()
+          ]);
+      
+          return transaction;
+      
         } catch (error) {
-            logger.error('Failed to process usage:', error);
-            throw error;
+          console.error('Failed to process usage:', error);
+          throw error;
         }
     }
 

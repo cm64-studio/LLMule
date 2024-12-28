@@ -41,7 +41,7 @@ class ProviderManager {
   handleConnection(ws, providerId) {
     ws.isAlive = true;
     ws.lastHeartbeat = Date.now();
-    
+
     ws.on('pong', () => {
       ws.isAlive = true;
       ws.lastHeartbeat = Date.now();
@@ -49,9 +49,14 @@ class ProviderManager {
     });
   }
 
+
   async registerProvider(socketId, providerInfo) {
     console.log('\n=== Provider Registration ===');
-    console.log('Registering provider:', { socketId, models: providerInfo.models });
+    console.log('Registering provider:', {
+      socketId,
+      models: providerInfo.models,
+      hasApiKey: !!providerInfo.apiKey
+    });
     
     try {
       let userId = null;
@@ -61,42 +66,84 @@ class ProviderManager {
           emailVerified: true,
           status: 'active'
         });
-
+  
+        console.log('User lookup result:', {
+          found: !!user,
+          userId: user?._id?.toString(),
+          status: user?.status,
+          verified: user?.emailVerified
+        });
+  
         if (user) {
           userId = user._id;
-          await user.registerAsProvider(providerInfo.models);
-          this.providerUserIds.set(socketId, userId);
+          
+          // Format models properly for the schema
+          const formattedModels = providerInfo.models.map(model => {
+            // If it's already an object, use it
+            if (typeof model === 'object') {
+              return {
+                name: model.name,
+                type: model.type || 'llm',
+                tier: model.tier || 'medium'
+              };
+            }
+            // If it's a string, create an object
+            return {
+              name: model,
+              type: 'llm',
+              tier: 'medium' // Default tier
+            };
+          });
+  
+          console.log('Formatted models:', formattedModels);
+  
+          // Update user's provider status
+          const updatedUser = await User.findByIdAndUpdate(
+            userId,
+            {
+              $set: {
+                'provider.isProvider': true,
+                'provider.models': formattedModels,
+                'provider.lastSeen': new Date()
+              }
+            },
+            { new: true }
+          );
+  
+          console.log('Updated user provider status:', {
+            isProvider: updatedUser.provider.isProvider,
+            modelCount: updatedUser.provider.models.length
+          });
+  
+        } else {
+          console.error('No valid user found for API key');
+          return false;
         }
       }
-
-      // Initialize provider with active status immediately
-      const provider = {
+  
+      this.providers.set(socketId, {
         ...providerInfo,
         userId,
         lastHeartbeat: Date.now(),
         status: 'active',
-        readyForRequests: true // New flag
-      };
-
-      this.providers.set(socketId, provider);
-      this.requestCounts.set(socketId, 0);
-      this.handleConnection(providerInfo.ws, socketId);
-
-      // Ensure WebSocket is properly initialized
-      provider.ws.isAlive = true;
-      provider.ws.lastHeartbeat = Date.now();
-
-      console.log('Provider registered:', {
-        socketId,
-        userId: userId ? userId.toString() : 'anonymous',
-        models: providerInfo.models,
-        status: 'active',
         readyForRequests: true
       });
-
-      this.logProvidersState();
+      
+      if (userId) {
+        this.providerUserIds.set(socketId, userId);
+      }
+      
+      this.requestCounts.set(socketId, 0);
+      
+      console.log('Provider registered successfully:', {
+        socketId,
+        userId: userId?.toString(),
+        modelCount: providerInfo.models.length,
+        status: 'active'
+      });
+  
       return true;
-
+  
     } catch (error) {
       console.error('Provider registration failed:', error);
       return false;
@@ -125,10 +172,10 @@ class ProviderManager {
   findAvailableProvider(model = null) {
     console.log('\n=== Finding Provider with Load Balancing ===');
     console.log('Finding provider for model:', model);
-    
+
     const eligibleProviders = Array.from(this.providers.entries())
-      .filter(([_, provider]) => 
-        provider.status === 'active' && 
+      .filter(([_, provider]) =>
+        provider.status === 'active' &&
         provider.readyForRequests === true && // Check new flag
         (!model || provider.models.includes(model))
       );
@@ -154,7 +201,7 @@ class ProviderManager {
       .sort((a, b) => a.load - b.load);
 
     const selected = providersByLoad[0];
-    this.requestCounts.set(selected.socketId, 
+    this.requestCounts.set(selected.socketId,
       (this.requestCounts.get(selected.socketId) || 0) + 1
     );
 
@@ -173,7 +220,7 @@ class ProviderManager {
   async routeRequest(requestData) {
     console.log('Routing request for model:', requestData.model);
     const providerInfo = this.findAvailableProvider(requestData.model);
-    
+
     if (!providerInfo) {
       throw new Error('No available providers');
     }
@@ -187,14 +234,14 @@ class ProviderManager {
         reject(new Error('Request timeout after 5 minutes'));
       }, 300000);
 
-      this.pendingRequests.set(requestId, { 
-        resolve, 
-        reject, 
+      this.pendingRequests.set(requestId, {
+        resolve,
+        reject,
         timeout,
         socketId: providerInfo.socketId,
         providerId: providerInfo.provider.userId
       });
-      
+
       providerInfo.provider.ws.send(JSON.stringify({
         type: 'completion_request',
         requestId,
@@ -246,7 +293,7 @@ class ProviderManager {
   logProvidersState() {
     console.log('\n=== Current Providers State ===');
     console.log('Total providers:', this.providers.size);
-    
+
     for (const [id, provider] of this.providers) {
       console.log(`- Provider ${id}:`, {
         status: provider.status,

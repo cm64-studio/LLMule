@@ -39,9 +39,20 @@ const userSchema = new mongoose.Schema({
       default: false
     },
     models: [{
-      name: String,
-      type: String,
-      tier: String
+      name: {
+        type: String,
+        required: true
+      },
+      type: {
+        type: String,
+        enum: ['llm', 'image', 'audio'],
+        default: 'llm'
+      },
+      tier: {
+        type: String,
+        enum: ['small', 'medium', 'large', 'xl'],
+        default: 'medium'
+      }
     }],
     lastSeen: Date
   },

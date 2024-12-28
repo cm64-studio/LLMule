@@ -9,8 +9,11 @@ const authenticateApiKey = async (req, res, next) => {
                    authHeader.substring(7) : 
                    req.headers['x-api-key'];
 
-    console.log('Received headers:', req.headers); // Add this for debugging
-    console.log('Extracted API key:', apiKey); // Add this for debugging
+    console.log('Auth debug:', {
+      headers: req.headers,
+      authHeader,
+      extractedApiKey: apiKey
+    });
 
     if (!apiKey) {
       return res.status(401).json({ 
@@ -24,6 +27,14 @@ const authenticateApiKey = async (req, res, next) => {
       apiKey,
       emailVerified: true, 
       status: 'active'
+    });
+
+    console.log('Auth user lookup result:', {
+      apiKeyProvided: apiKey,
+      userFound: !!user,
+      userId: user?._id?.toString(),
+      userStatus: user?.status,
+      emailVerified: user?.emailVerified
     });
 
     if (!user) {
