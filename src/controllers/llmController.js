@@ -5,7 +5,7 @@ const TokenService = require('../services/tokenService');
 const { TokenCalculator } = require('../config/tokenomics');
 const RequestTimer = require('../utils/requestTimer');
 const UsageLog = require('../models/usageLogModel');
-
+const mongoose = require('mongoose');
 const handleLLMRequest = async (req, res) => {
   const requestId = `req_${Date.now()}`;
   RequestTimer.startRequest(requestId);
@@ -132,64 +132,78 @@ async function logUsage({ consumerId, providerId, model, modelInfo, usage, timin
     modelInfo 
   });
   
-  const muleAmount = TokenCalculator.tokensToMules(usage.total_tokens, modelInfo.tier);
+  // Ensure we have valid token counts
+  const validatedUsage = {
+    prompt_tokens: Math.max(0, usage.prompt_tokens || 0),
+    completion_tokens: Math.max(0, usage.completion_tokens || 0),
+    total_tokens: Math.max(0, usage.total_tokens || 0)
+  };
+
+  // If total_tokens is 0, calculate from components
+  if (validatedUsage.total_tokens === 0) {
+    validatedUsage.total_tokens = validatedUsage.prompt_tokens + validatedUsage.completion_tokens;
+  }
+
+  const muleAmount = TokenCalculator.tokensToMules(validatedUsage.total_tokens, modelInfo.tier);
   console.log('Calculated MULE amount:', muleAmount);
 
   try {
-    // For anonymous providers (UUID), we only track the usage without creating a log
-    const isAnonymousProvider = providerId && !providerId.match(/^[0-9a-fA-F]{24}$/);
+    // Convert ObjectId to string for comparison
+    const providerIdString = providerId ? 
+      (providerId instanceof mongoose.Types.ObjectId ? 
+        providerId.toString() : providerId) : null;
+
+    // Check if provider is anonymous (UUID) or registered (ObjectId)
+    const isAnonymousProvider = providerIdString && 
+      !mongoose.Types.ObjectId.isValid(providerIdString);
     
     if (isAnonymousProvider) {
-      console.log('Anonymous provider detected:', providerId);
-      // We still process usage for statistics but don't create a log
-      if (usage.total_tokens > 0) {
+      console.log('Anonymous provider detected:', providerIdString);
+      if (validatedUsage.total_tokens > 0) {
         await TokenService.processUsage({
           consumerId,
-          // Don't pass providerId for anonymous providers
           model,
           modelType: modelInfo.type || 'llm',
           modelTier: modelInfo.tier,
-          rawAmount: usage.total_tokens,
+          rawAmount: validatedUsage.total_tokens,
           isAnonymous: true
         });
       }
-    } else if (providerId && providerId.match(/^[0-9a-fA-F]{24}$/)) {
-      // Full logging for registered providers
+    } else if (providerIdString && mongoose.Types.ObjectId.isValid(providerIdString)) {
       const usageLog = await UsageLog.create({
         consumerId,
-        providerId,
+        providerId: new mongoose.Types.ObjectId(providerIdString),
         model,
         modelTier: modelInfo.tier,
-        tokensUsed: usage.total_tokens,
-        promptTokens: usage.prompt_tokens,
-        completionTokens: usage.completion_tokens,
+        tokensUsed: validatedUsage.total_tokens,
+        promptTokens: validatedUsage.prompt_tokens,
+        completionTokens: validatedUsage.completion_tokens,
         duration_seconds: timing.duration_seconds,
         tokens_per_second: timing.tokens_per_second,
-        isSelfService: consumerId.toString() === providerId.toString(),
+        isSelfService: consumerId.toString() === providerIdString,
         muleAmount: muleAmount
       });
+
       console.log('Created usage log:', usageLog._id);
 
-      if (usage.total_tokens > 0) {
+      if (validatedUsage.total_tokens > 0) {
         await TokenService.processUsage({
           consumerId,
-          providerId,
+          providerId: new mongoose.Types.ObjectId(providerIdString),
           model,
           modelType: modelInfo.type || 'llm',
           modelTier: modelInfo.tier,
-          rawAmount: usage.total_tokens
+          rawAmount: validatedUsage.total_tokens
         });
       }
     }
   } catch (error) {
     console.error('Error logging usage:', error);
-    // Don't throw the error - we still want to return the response to the user
-    // Just log it for monitoring
   }
 
   return { 
     muleAmount, 
-    isAnonymous: providerId && !providerId.match(/^[0-9a-fA-F]{24}$/) 
+    isAnonymous: providerId && !mongoose.Types.ObjectId.isValid(providerId.toString()) 
   };
 }
 

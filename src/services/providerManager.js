@@ -69,20 +69,29 @@ class ProviderManager {
         }
       }
 
-      this.providers.set(socketId, {
+      // Initialize provider with active status immediately
+      const provider = {
         ...providerInfo,
         userId,
         lastHeartbeat: Date.now(),
-        status: 'active'
-      });
-      
+        status: 'active',
+        readyForRequests: true // New flag
+      };
+
+      this.providers.set(socketId, provider);
       this.requestCounts.set(socketId, 0);
       this.handleConnection(providerInfo.ws, socketId);
+
+      // Ensure WebSocket is properly initialized
+      provider.ws.isAlive = true;
+      provider.ws.lastHeartbeat = Date.now();
 
       console.log('Provider registered:', {
         socketId,
         userId: userId ? userId.toString() : 'anonymous',
-        models: providerInfo.models
+        models: providerInfo.models,
+        status: 'active',
+        readyForRequests: true
       });
 
       this.logProvidersState();
@@ -120,6 +129,7 @@ class ProviderManager {
     const eligibleProviders = Array.from(this.providers.entries())
       .filter(([_, provider]) => 
         provider.status === 'active' && 
+        provider.readyForRequests === true && // Check new flag
         (!model || provider.models.includes(model))
       );
 
@@ -127,6 +137,13 @@ class ProviderManager {
       console.log('No eligible providers found');
       return null;
     }
+
+    // Add more detailed logging
+    console.log('Eligible providers:', eligibleProviders.map(([id, p]) => ({
+      id,
+      models: p.models,
+      load: this.requestCounts.get(id) || 0
+    })));
 
     const providersByLoad = eligibleProviders
       .map(([socketId, provider]) => ({
@@ -140,6 +157,11 @@ class ProviderManager {
     this.requestCounts.set(selected.socketId, 
       (this.requestCounts.get(selected.socketId) || 0) + 1
     );
+
+    console.log('Selected provider:', {
+      socketId: selected.socketId,
+      currentLoad: this.requestCounts.get(selected.socketId)
+    });
 
     return {
       socketId: selected.socketId,
