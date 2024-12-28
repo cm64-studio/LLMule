@@ -123,14 +123,38 @@ function calculateUsage(response, modelInfo) {
 }
 
 async function logUsage({ consumerId, providerId, model, modelInfo, usage, timing }) {
-  console.log('Logging usage:', { consumerId, providerId, model, usage, timing });
+  console.log('Logging usage:', { 
+    consumerId: consumerId.toString(),
+    providerId,
+    model,
+    usage,
+    timing,
+    modelInfo 
+  });
   
   const muleAmount = TokenCalculator.tokensToMules(usage.total_tokens, modelInfo.tier);
   console.log('Calculated MULE amount:', muleAmount);
 
   try {
-    // Create usage log if we have a valid provider ID
-    if (providerId && providerId.match(/^[0-9a-fA-F]{24}$/)) {
+    // For anonymous providers (UUID), we only track the usage without creating a log
+    const isAnonymousProvider = providerId && !providerId.match(/^[0-9a-fA-F]{24}$/);
+    
+    if (isAnonymousProvider) {
+      console.log('Anonymous provider detected:', providerId);
+      // We still process usage for statistics but don't create a log
+      if (usage.total_tokens > 0) {
+        await TokenService.processUsage({
+          consumerId,
+          // Don't pass providerId for anonymous providers
+          model,
+          modelType: modelInfo.type || 'llm',
+          modelTier: modelInfo.tier,
+          rawAmount: usage.total_tokens,
+          isAnonymous: true
+        });
+      }
+    } else if (providerId && providerId.match(/^[0-9a-fA-F]{24}$/)) {
+      // Full logging for registered providers
       const usageLog = await UsageLog.create({
         consumerId,
         providerId,
@@ -144,29 +168,29 @@ async function logUsage({ consumerId, providerId, model, modelInfo, usage, timin
         isSelfService: consumerId.toString() === providerId.toString(),
         muleAmount: muleAmount
       });
-      console.log('Created usage log:', usageLog);
-    } else {
-      console.log('Skipping usage log - invalid provider ID:', providerId);
-    }
+      console.log('Created usage log:', usageLog._id);
 
-    // Process token usage if we have tokens
-    if (usage.total_tokens > 0) {
-      const tokenUsage = await TokenService.processUsage({
-        consumerId,
-        providerId,
-        model,
-        modelType: modelInfo.type || 'llm',
-        modelTier: modelInfo.tier,
-        rawAmount: usage.total_tokens
-      });
-      console.log('Processed token usage:', tokenUsage);
-    } else {
-      console.log('Skipping token processing - no tokens used');
+      if (usage.total_tokens > 0) {
+        await TokenService.processUsage({
+          consumerId,
+          providerId,
+          model,
+          modelType: modelInfo.type || 'llm',
+          modelTier: modelInfo.tier,
+          rawAmount: usage.total_tokens
+        });
+      }
     }
   } catch (error) {
     console.error('Error logging usage:', error);
-    throw error;
+    // Don't throw the error - we still want to return the response to the user
+    // Just log it for monitoring
   }
+
+  return { 
+    muleAmount, 
+    isAnonymous: providerId && !providerId.match(/^[0-9a-fA-F]{24}$/) 
+  };
 }
 
 function formatResponse({ 
