@@ -1,4 +1,5 @@
 // controllers/llmController.js
+// controllers/llmController.js
 const { ModelManager } = require('../config/models');
 const { providerManager } = require('../services/providerManager');
 const TokenService = require('../services/tokenService');
@@ -6,6 +7,38 @@ const { TokenCalculator } = require('../config/tokenomics');
 const RequestTimer = require('../utils/requestTimer');
 const UsageLog = require('../models/usageLogModel');
 const mongoose = require('mongoose');
+
+// OpenAI API compatible error responses
+const APIErrors = {
+  NO_MODELS_AVAILABLE: {
+    status: 400,
+    error: {
+      message: "No models available for the requested tier or model",
+      type: "invalid_request_error",
+      param: "model",
+      code: "model_not_available"
+    }
+  },
+  INSUFFICIENT_BALANCE: {
+    status: 402,
+    error: {
+      message: "Insufficient balance to process request",
+      type: "invalid_request_error",
+      param: "tokens",
+      code: "insufficient_balance"
+    }
+  },
+  INVALID_MODEL: {
+    status: 400,
+    error: {
+      message: "The requested model is not valid",
+      type: "invalid_request_error",
+      param: "model",
+      code: "invalid_model"
+    }
+  }
+};
+
 const handleLLMRequest = async (req, res) => {
   const requestId = `req_${Date.now()}`;
   RequestTimer.startRequest(requestId);
@@ -67,9 +100,15 @@ async function selectModelAndProvider(requestedModel) {
         })
       }))
       .filter(p => p.models.length > 0);
+      
     if (availableModels.length === 0) {
-      throw new Error(`No available models for tier: ${requestedModel}`);
+      // Enhanced error object
+      const error = new Error("No models available");
+      error.code = "NO_MODELS_AVAILABLE";
+      error.tier = requestedModel;
+      throw error;
     }
+    
     const selected = availableModels[Math.floor(Math.random() * availableModels.length)];
     return {
       selectedModel: selected.models[0],
@@ -78,12 +117,17 @@ async function selectModelAndProvider(requestedModel) {
   }
 
   if (!ModelManager.validateModel(requestedModel)) {
-    throw new Error("Invalid model specified");
+    const error = new Error("Invalid model");
+    error.code = "INVALID_MODEL";
+    throw error;
   }
 
   const provider = providerManager.findAvailableProvider(requestedModel);
   if (!provider) {
-    throw new Error("No provider available for the requested model");
+    const error = new Error("No provider available");
+    error.code = "NO_MODELS_AVAILABLE";
+    error.model = requestedModel;
+    throw error;
   }
 
   return {
@@ -247,13 +291,41 @@ function formatResponse({
 
 function handleError(error, res) {
   console.error('LLM Request Error:', error);
-  res.status(500).json({
+
+  // Map error codes to API responses
+  const errorResponses = {
+    NO_MODELS_AVAILABLE: APIErrors.NO_MODELS_AVAILABLE,
+    INSUFFICIENT_BALANCE: APIErrors.INSUFFICIENT_BALANCE,
+    INVALID_MODEL: APIErrors.INVALID_MODEL
+  };
+
+  // Get the appropriate error response or use a generic one
+  const apiError = errorResponses[error.code] || {
+    status: 500,
     error: {
-      message: error.message || 'Failed to process request',
-      type: "server_error",
+      message: error.message || 'An unexpected error occurred',
+      type: "api_error",
       code: "internal_error"
     }
+  };
+
+  // Add request ID and timestamp for debugging
+  const errorResponse = {
+    error: {
+      ...apiError.error,
+      request_id: `req_${Date.now()}`,
+      timestamp: new Date().toISOString()
+    }
+  };
+
+  // Log detailed error for monitoring
+  console.error('API Error Response:', {
+    status: apiError.status,
+    error: errorResponse.error,
+    originalError: error
   });
+
+  res.status(apiError.status).json(errorResponse);
 }
 
 module.exports = { handleLLMRequest };
