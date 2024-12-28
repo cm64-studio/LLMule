@@ -51,8 +51,8 @@ class ProviderManager {
 
 
   async registerProvider(socketId, providerInfo) {
-    console.log('\n=== Provider Registration ===');
-    console.log('Registering provider:', {
+    console.log('\n=== Provider Registration Debug ===');
+    console.log('Raw provider info:', {
       socketId,
       models: providerInfo.models,
       hasApiKey: !!providerInfo.apiKey
@@ -77,21 +77,28 @@ class ProviderManager {
         if (user) {
           userId = user._id;
           
-          // Format models properly for the schema
+          // Format and normalize model names
           const formattedModels = providerInfo.models.map(model => {
+            console.log('Processing model:', model);
+            const modelInfo = ModelManager.getModelInfo(model);
+            console.log('Model classification:', {
+              name: model,
+              info: modelInfo
+            });
+
             // If it's already an object, use it
             if (typeof model === 'object') {
               return {
                 name: model.name,
                 type: model.type || 'llm',
-                tier: model.tier || 'medium'
+                tier: modelInfo?.tier || 'medium'
               };
             }
             // If it's a string, create an object
             return {
               name: model,
               type: 'llm',
-              tier: 'medium' // Default tier
+              tier: modelInfo?.tier || 'medium'
             };
           });
   
@@ -112,7 +119,8 @@ class ProviderManager {
   
           console.log('Updated user provider status:', {
             isProvider: updatedUser.provider.isProvider,
-            modelCount: updatedUser.provider.models.length
+            modelCount: updatedUser.provider.models.length,
+            models: updatedUser.provider.models
           });
   
         } else {
@@ -121,13 +129,17 @@ class ProviderManager {
         }
       }
   
-      this.providers.set(socketId, {
+      // Store provider information with formatted models
+      const providerData = {
         ...providerInfo,
+        models: formattedModels || providerInfo.models, // Use formatted if available
         userId,
         lastHeartbeat: Date.now(),
         status: 'active',
         readyForRequests: true
-      });
+      };
+
+      this.providers.set(socketId, providerData);
       
       if (userId) {
         this.providerUserIds.set(socketId, userId);
@@ -135,17 +147,24 @@ class ProviderManager {
       
       this.requestCounts.set(socketId, 0);
       
-      console.log('Provider registered successfully:', {
+      console.log('Provider registration complete:', {
         socketId,
         userId: userId?.toString(),
-        modelCount: providerInfo.models.length,
+        modelCount: providerData.models.length,
+        models: providerData.models,
         status: 'active'
       });
+
+      // Log current provider state
+      this.logProvidersState();
   
       return true;
   
     } catch (error) {
-      console.error('Provider registration failed:', error);
+      console.error('Provider registration failed:', {
+        error: error.message,
+        stack: error.stack
+      });
       return false;
     }
   }
@@ -170,15 +189,57 @@ class ProviderManager {
   }
 
   findAvailableProvider(model = null) {
-    console.log('\n=== Finding Provider with Load Balancing ===');
-    console.log('Finding provider for model:', model);
+    console.log('\n=== Finding Provider Debug ===');
+    console.log('Looking for model:', model);
 
+    // Get all active providers
     const eligibleProviders = Array.from(this.providers.entries())
-      .filter(([_, provider]) =>
-        provider.status === 'active' &&
-        provider.readyForRequests === true && // Check new flag
-        (!model || provider.models.includes(model))
-      );
+      .filter(([_, provider]) => {
+        const isActive = provider.status === 'active';
+        const isReady = provider.readyForRequests === true;
+        
+        console.log('Provider status check:', {
+          providerId: _.substring(0, 8),
+          active: isActive,
+          ready: isReady,
+          modelCount: provider.models?.length || 0
+        });
+        
+        return isActive && isReady;
+      })
+      .filter(([_, provider]) => {
+        if (!model) return true;
+        
+        // Check if provider has matching model
+        const hasModel = provider.models.some(providerModel => {
+          // Get model info for both requested and provider model
+          const requestedInfo = ModelManager.getModelInfo(model);
+          const providerInfo = ModelManager.getModelInfo(providerModel);
+          
+          console.log('Model comparison:', {
+            requested: {
+              name: model,
+              tier: requestedInfo?.tier
+            },
+            provider: {
+              name: providerModel,
+              tier: providerInfo?.tier
+            }
+          });
+
+          // Match by exact name or matching tier
+          return providerModel === model || 
+                 (requestedInfo?.tier && requestedInfo.tier === providerInfo?.tier);
+        });
+
+        console.log('Provider model check:', {
+          providerId: _.substring(0, 8),
+          hasModel,
+          availableModels: provider.models
+        });
+
+        return hasModel;
+      });
 
     if (eligibleProviders.length === 0) {
       console.log('No eligible providers found');
@@ -187,7 +248,7 @@ class ProviderManager {
 
     // Add more detailed logging
     console.log('Eligible providers:', eligibleProviders.map(([id, p]) => ({
-      id,
+      id: id.substring(0, 8),
       models: p.models,
       load: this.requestCounts.get(id) || 0
     })));
@@ -206,8 +267,9 @@ class ProviderManager {
     );
 
     console.log('Selected provider:', {
-      socketId: selected.socketId,
-      currentLoad: this.requestCounts.get(selected.socketId)
+      socketId: selected.socketId.substring(0, 8),
+      currentLoad: this.requestCounts.get(selected.socketId),
+      selectedModels: selected.provider.models
     });
 
     return {
@@ -216,6 +278,7 @@ class ProviderManager {
       userId: selected.provider.userId
     };
   }
+
 
   async routeRequest(requestData) {
     console.log('Routing request for model:', requestData.model);
@@ -295,10 +358,13 @@ class ProviderManager {
     console.log('Total providers:', this.providers.size);
 
     for (const [id, provider] of this.providers) {
-      console.log(`- Provider ${id}:`, {
+      console.log(`Provider ${id}:`, {
         status: provider.status,
         userId: provider.userId ? provider.userId.toString() : 'anonymous',
-        models: provider.models,
+        models: provider.models.map(m => ({
+          name: m.name || m,
+          tier: m.tier || 'unknown'
+        })),
         lastHeartbeat: new Date(provider.lastHeartbeat).toISOString(),
         hasWebSocket: !!provider.ws,
         currentLoad: this.requestCounts.get(id) || 0

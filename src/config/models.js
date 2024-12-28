@@ -1,3 +1,4 @@
+// src/config/models.js
 const modelConfig = {
   tiers: {
     SMALL: 'small',   // Up to 3B params
@@ -15,6 +16,7 @@ const modelConfig = {
       /tiny/i,           // TinyLlama etc
       /small/i,          // Small variants
       /phi-2/i,          // Phi-2 specific
+      /phi-v2/i,         // Phi variants
     ],
     medium: [
       /7\.?[0-9]?b/i,    // 7B variants (Mistral, Llama2 etc)
@@ -42,7 +44,8 @@ const modelConfig = {
     'phi': {
       '1': 'small',
       '2': 'small',
-      '3': 'medium'
+      '3': 'medium',
+      '4': 'large'
     },
     'mistral': 'medium',
     'mixtral': 'large',
