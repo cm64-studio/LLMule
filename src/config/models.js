@@ -144,106 +144,48 @@ const modelConfig = {
 };
 
 // src/config/models.js
-
 class ModelManager {
   static getModelInfo(modelName) {
     console.log('Getting model info for:', modelName);
     
-    // Handle cases where modelName is an object
-    if (typeof modelName === 'object') {
-      if (modelName.name) {
-        modelName = modelName.name;
-      } else {
-        console.warn('Invalid model object:', modelName);
-        return this._createModelInfo('medium'); // Safe default
-      }
+    // Handle cases where modelName is an object or has special characters
+    const normalizedName = typeof modelName === 'object' 
+      ? modelName.name?.toLowerCase() 
+      : modelName?.toLowerCase();
+
+    if (!normalizedName) {
+      console.warn('Invalid model name:', modelName);
+      return this._createModelInfo('medium'); // Safe default
     }
 
-    // Now we can safely use string methods
-    try {
-      const normalizedName = modelName.toLowerCase();
+    // Handle vanilj/phi-4 specifically
+    if (normalizedName.includes('phi-4')) {
+      return this._createModelInfo('large');
+    }
 
-      // Try to identify model family
-      for (const [family, config] of Object.entries(modelConfig.modelFamilies)) {
-        if (normalizedName.includes(family)) {
-          // If family has specific versions
-          if (typeof config === 'object') {
-            for (const [version, tier] of Object.entries(config)) {
-              if (normalizedName.includes(version)) {
-                return this._createModelInfo(tier);
-              }
+    // Rest of your existing pattern matching...
+    for (const [family, config] of Object.entries(modelConfig.modelFamilies)) {
+      if (normalizedName.includes(family)) {
+        if (typeof config === 'object') {
+          for (const [version, tier] of Object.entries(config)) {
+            if (normalizedName.includes(version)) {
+              return this._createModelInfo(tier);
             }
-          } else {
-            // Family has fixed tier
-            return this._createModelInfo(config);
           }
+        } else {
+          return this._createModelInfo(config);
         }
       }
-
-      // Try pattern matching for size
-      for (const [tier, patterns] of Object.entries(modelConfig.sizePatterns)) {
-        for (const pattern of patterns) {
-          if (pattern.test(normalizedName)) {
-            return this._createModelInfo(tier);
-          }
-        }
-      }
-
-      // Default to medium if contains common LLM names
-      if (normalizedName.includes('llm') || 
-          normalizedName.includes('hermes') ||
-          normalizedName.includes('neural')) {
-        return this._createModelInfo('medium');
-      }
-
-      console.warn(`Unrecognized model pattern: ${modelName}`);
-      return this._createModelInfo('medium'); // Safe default
-    } catch (error) {
-      console.error('Error processing model name:', {
-        modelName,
-        error: error.message
-      });
-      return this._createModelInfo('medium'); // Safe default
     }
-  }
 
-  static _createModelInfo(tier) {
-    // Create standard model info based on tier
-    const requirements = {
-      small: { ram: '4GB', gpu: false },
-      medium: { ram: '8GB', gpu: '8GB VRAM' },
-      large: { ram: '16GB', gpu: '16GB VRAM' },
-      xl: { ram: '32GB', gpu: '32GB VRAM' }
-    };
+    // Add debug logging
+    console.log('Model classification result:', {
+      name: normalizedName,
+      patterns: modelConfig.sizePatterns.large
+        .map(p => ({ pattern: p.toString(), matches: p.test(normalizedName) }))
+    });
 
-    const contexts = {
-      small: 4096,
-      medium: 8192,
-      large: 32768,
-      xl: 32768
-    };
-
-    return {
-      tier,
-      context: contexts[tier],
-      requirements: requirements[tier]
-    };
-  }
-
-  // Keep existing utility methods...
-  static getTierModels(tier) {
-    return Object.entries(modelConfig.models)
-      .filter(([_, info]) => info.tier === tier)
-      .map(([name]) => name);
-  }
-
-  static validateModel(modelName) {
-    return this.getModelInfo(modelName) !== undefined;
-  }
-
-  static getRandomModelForTier(tier) {
-    const models = this.getTierModels(tier);
-    return models[Math.floor(Math.random() * models.length)];
+    return this._createModelInfo('medium'); // Safe default
   }
 }
 

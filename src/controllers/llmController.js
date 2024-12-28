@@ -88,6 +88,8 @@ const handleLLMRequest = async (req, res) => {
 };
 
 async function selectModelAndProvider(requestedModel) {
+  console.log('Finding provider for model:', requestedModel);
+
   if (['small', 'medium', 'large', 'xl'].includes(requestedModel)) {
     const providers = providerManager.getProvidersInfo();
     const availableModels = providers
@@ -95,7 +97,14 @@ async function selectModelAndProvider(requestedModel) {
       .map(provider => ({
         provider: provider.id,
         models: provider.models.filter(model => {
-          const info = ModelManager.getModelInfo(model);
+          // Normalize model info
+          const modelName = typeof model === 'object' ? model.name : model;
+          const info = ModelManager.getModelInfo(modelName);
+          console.log('Provider model check:', {
+            model: modelName,
+            tier: info?.tier,
+            requestedTier: requestedModel
+          });
           return info?.tier === requestedModel;
         })
       }))
