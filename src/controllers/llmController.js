@@ -44,12 +44,12 @@ const handleLLMRequest = async (req, res) => {
   RequestTimer.startRequest(requestId);
 
   try {
-    const { selectedModel, selectedProvider } = await selectModelAndProvider(req.body.model);
+    const { selectedModel, socketId, userId } = await selectModelAndProvider(req.body.model);
     const modelInfo = ModelManager.getModelInfo(selectedModel);
     
     const response = await processLLMRequest(
       selectedModel,
-      selectedProvider,
+      socketId, // Use socketId for WebSocket communication
       req.body,
       modelInfo
     );
@@ -59,19 +59,19 @@ const handleLLMRequest = async (req, res) => {
 
     await logUsage({
       consumerId: req.user._id,
-      providerId: selectedProvider,
+      providerId: userId, // Use MongoDB ObjectId for logging
       model: selectedModel,
       modelInfo,
       usage,
       timing
     });
 
-    const isSelfService = req.user._id.toString() === selectedProvider.toString();
+    const isSelfService = req.user._id.toString() === userId.toString();
     const muleAmount = TokenCalculator.tokensToMules(usage.total_tokens, modelInfo.tier);
 
     const formattedResponse = formatResponse({
       selectedModel,
-      selectedProvider,
+      socketId,
       modelInfo,
       response,
       usage,
@@ -88,50 +88,24 @@ const handleLLMRequest = async (req, res) => {
 };
 
 async function selectModelAndProvider(requestedModel) {
-  console.log('Finding provider for model:', requestedModel);
-
   const providers = providerManager.getProvidersInfo();
-  console.log('Available providers:', providers.map(p => ({
-    id: p.id,
-    status: p.status,
-    modelCount: p.models.length,
-    models: p.models.map(m => ({
-      name: typeof m === 'object' ? m.name : m,
-      tier: ModelManager.getModelInfo(m).tier
-    }))
-  })));
-
+  
   if (['small', 'medium', 'large', 'xl'].includes(requestedModel)) {
     const availableModels = providers
       .filter(p => p.status === 'active')
       .map(provider => {
         const matchingModels = provider.models.filter(model => {
           const info = ModelManager.getModelInfo(model);
-          console.log('Model tier check:', {
-            model: typeof model === 'object' ? model.name : model,
-            tier: info?.tier,
-            requestedTier: requestedModel,
-            matches: info?.tier === requestedModel
-          });
           return info?.tier === requestedModel;
         });
         
         return {
-          provider: provider.id,
+          socketId: provider.id,  // This is the WebSocket ID
+          userId: provider.userId, // This is the MongoDB ObjectId
           models: matchingModels
         };
       })
       .filter(p => p.models.length > 0);
-
-    // More detailed logging
-    console.log('Models by tier:', {
-      requestedTier: requestedModel,
-      availableProviders: availableModels.length,
-      models: availableModels.map(p => ({
-        providerId: p.provider,
-        models: p.models
-      }))
-    });
 
     if (availableModels.length === 0) {
       const error = new Error('No models available');
@@ -143,7 +117,8 @@ async function selectModelAndProvider(requestedModel) {
     const selected = availableModels[Math.floor(Math.random() * availableModels.length)];
     return {
       selectedModel: selected.models[0],
-      selectedProvider: selected.provider
+      socketId: selected.socketId,
+      userId: selected.userId // MongoDB ObjectId
     };
   }
 
@@ -167,20 +142,26 @@ async function selectModelAndProvider(requestedModel) {
   };
 }
 
-async function processLLMRequest(model, provider, requestData, modelInfo) {
-  const response = await providerManager.routeRequest({
-    model,
-    messages: requestData.messages,
-    temperature: parseFloat(requestData.temperature) || 0.7,
-    max_tokens: parseInt(requestData.max_tokens) || modelInfo.context,
-    stream: false
-  });
+async function processLLMRequest(model, providerId, requestData, modelInfo) {
+  try {
+      const response = await providerManager.routeRequest({
+          model,
+          messages: requestData.messages,
+          temperature: parseFloat(requestData.temperature) || 0.7,
+          max_tokens: parseInt(requestData.max_tokens) || modelInfo.context,
+          stream: false,
+          providerId  // Pass the provider ID through
+      });
 
-  if (!response || !response.choices) {
-    throw new Error("Invalid response from provider");
+      if (!response || !response.choices) {
+          throw new Error("Invalid response from provider");
+      }
+
+      return response;
+  } catch (error) {
+      console.error('Error processing request:', error);
+      throw error;
   }
-
-  return response;
 }
 
 function calculateUsage(response, modelInfo) {
@@ -199,89 +180,76 @@ function calculateUsage(response, modelInfo) {
 
 async function logUsage({ consumerId, providerId, model, modelInfo, usage, timing }) {
   console.log('Logging usage:', { 
-    consumerId: consumerId.toString(),
-    providerId,
-    model,
-    usage,
-    timing,
-    modelInfo 
+      consumerId: consumerId.toString(),
+      providerId: providerId,
+      model,
+      usage,
+      timing,
+      modelInfo 
   });
   
-  // Ensure we have valid token counts
-  const validatedUsage = {
-    prompt_tokens: Math.max(0, usage.prompt_tokens || 0),
-    completion_tokens: Math.max(0, usage.completion_tokens || 0),
-    total_tokens: Math.max(0, usage.total_tokens || 0)
-  };
-
-  // If total_tokens is 0, calculate from components
-  if (validatedUsage.total_tokens === 0) {
-    validatedUsage.total_tokens = validatedUsage.prompt_tokens + validatedUsage.completion_tokens;
-  }
-
-  // Get model name from object if needed
-  const modelName = typeof model === 'object' ? model.name : model;
-  const muleAmount = TokenCalculator.tokensToMules(validatedUsage.total_tokens, modelInfo.tier);
-  console.log('Calculated MULE amount:', muleAmount);
-
+  // Ensure both IDs are MongoDB ObjectIds
   try {
-    // Convert ObjectId to string for comparison
-    const providerIdString = providerId ? 
-      (providerId instanceof mongoose.Types.ObjectId ? 
-        providerId.toString() : providerId) : null;
+      // Convert string IDs to ObjectIds if needed
+      const consumerObjectId = typeof consumerId === 'string' ? 
+          new mongoose.Types.ObjectId(consumerId) : consumerId;
+          
+      const providerObjectId = typeof providerId === 'string' ? 
+          new mongoose.Types.ObjectId(providerId) : providerId;
 
-    // Check if provider is anonymous (UUID) or registered (ObjectId)
-    const isAnonymousProvider = providerIdString && 
-      !mongoose.Types.ObjectId.isValid(providerIdString);
-    
-    if (isAnonymousProvider) {
-      console.log('Anonymous provider detected:', providerIdString);
-      if (validatedUsage.total_tokens > 0) {
-        await TokenService.processUsage({
-          consumerId,
-          model: modelName, // Use string model name
-          modelType: modelInfo.type || 'llm',
-          modelTier: modelInfo.tier,
-          rawAmount: validatedUsage.total_tokens,
-          isAnonymous: true
-        });
+      if (!providerObjectId) {
+          console.error('Provider validation failed:', {
+              providerId,
+              type: typeof providerId
+          });
+          throw new Error('Invalid provider ID - registration required');
       }
-    } else if (providerIdString && mongoose.Types.ObjectId.isValid(providerIdString)) {
-      const usageLog = await UsageLog.create({
-        consumerId,
-        providerId: new mongoose.Types.ObjectId(providerIdString),
-        model: modelName, // Use string model name
-        modelTier: modelInfo.tier,
-        tokensUsed: validatedUsage.total_tokens,
-        promptTokens: validatedUsage.prompt_tokens,
-        completionTokens: validatedUsage.completion_tokens,
-        duration_seconds: timing.duration_seconds,
-        tokens_per_second: timing.tokens_per_second,
-        isSelfService: consumerId.toString() === providerIdString,
-        muleAmount: muleAmount
+
+      const validatedUsage = {
+          prompt_tokens: Math.max(0, usage.prompt_tokens || 0),
+          completion_tokens: Math.max(0, usage.completion_tokens || 0),
+          total_tokens: Math.max(0, usage.total_tokens || 0)
+      };
+
+      const muleAmount = TokenCalculator.tokensToMules(validatedUsage.total_tokens, modelInfo.tier);
+
+      // Check if this is a self-service request
+      const isSelfService = consumerObjectId.toString() === providerObjectId.toString();
+
+      // Create usage log with validated ObjectIds
+      await UsageLog.create({
+          consumerId: consumerObjectId,
+          providerId: providerObjectId,
+          model: typeof model === 'object' ? model.name : model,
+          modelTier: modelInfo.tier,
+          tokensUsed: validatedUsage.total_tokens,
+          promptTokens: validatedUsage.prompt_tokens,
+          completionTokens: validatedUsage.completion_tokens,
+          duration_seconds: timing.duration_seconds,
+          tokens_per_second: timing.tokens_per_second,
+          isSelfService,
+          muleAmount,
+          timestamp: new Date()
       });
 
-      console.log('Created usage log:', usageLog._id);
+      console.log('Usage log created successfully:', {
+          consumerId: consumerObjectId.toString(),
+          providerId: providerObjectId.toString(),
+          isSelfService
+      });
 
-      if (validatedUsage.total_tokens > 0) {
-        await TokenService.processUsage({
-          consumerId,
-          providerId: new mongoose.Types.ObjectId(providerIdString),
-          model: modelName, // Use string model name
-          modelType: modelInfo.type || 'llm',
-          modelTier: modelInfo.tier,
-          rawAmount: validatedUsage.total_tokens
-        });
-      }
-    }
+      return { muleAmount, isSelfService };
+
   } catch (error) {
-    console.error('Error logging usage:', error);
+      console.error('Error logging usage:', error);
+      if (error.message === 'Invalid provider ID - registration required') {
+          throw error;
+      }
+      if (error.name === 'BSONTypeError' || error.name === 'CastError') {
+          throw new Error('Invalid ID format provided');
+      }
+      throw error;
   }
-
-  return { 
-    muleAmount, 
-    isAnonymous: providerId && !mongoose.Types.ObjectId.isValid(providerId.toString()) 
-  };
 }
 
 function formatResponse({ 

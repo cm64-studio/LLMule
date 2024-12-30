@@ -107,9 +107,31 @@ wss.on('connection', (ws) => {
   const providerId = uuidv4();
   console.log(`New provider connected: ${providerId}`);
   
+  // Setup early connection tracking
+  ws.isAlive = true;
+  ws.lastPong = Date.now();
+  
+  // Store initial provider state
+  providerManager.providers.set(providerId, {
+    ws,
+    status: 'connecting',
+    readyForRequests: false,
+    lastHeartbeat: Date.now(),
+    models: [] // Will be populated on registration
+  });
+  
   ws.on('message', async (message) => {
+    console.log(`\n=== WebSocket Message from ${providerId} ===`);
     try {
-      const data = JSON.parse(message);
+      let data = JSON.parse(message);
+      console.log('Message type:', data.type);
+      
+      // Add ws reference to registration data
+      if (data.type === 'register') {
+        console.log('Processing registration with ws instance');
+        data.ws = ws;
+      }
+      
       await handleProviderMessage(ws, providerId, data);
     } catch (error) {
       console.error('Error handling message:', error);
@@ -123,6 +145,22 @@ wss.on('connection', (ws) => {
   ws.on('close', () => {
     console.log(`Provider disconnected: ${providerId}`);
     providerManager.removeProvider(providerId);
+  });
+
+  ws.on('pong', () => {
+    console.log(`Received pong from ${providerId}`);
+    ws.isAlive = true;
+    ws.lastPong = Date.now();
+    providerManager.updateProviderStatus(providerId, 'active');
+  });
+
+  // Setup ping handler
+  ws.on('ping', () => {
+    try {
+      ws.pong();
+    } catch (error) {
+      console.error(`Error sending pong to ${providerId}:`, error);
+    }
   });
 });
 

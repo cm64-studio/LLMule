@@ -102,94 +102,74 @@ class TokenService {
         model,
         modelType,
         modelTier,
-        rawAmount,
-        isAnonymous = false
+        usage,
+        performance
       }) {
         try {
-          // Calculate MULE amount and fees
-          const muleAmount = TokenCalculator.tokensToMules(rawAmount, modelTier);
+          const muleAmount = TokenCalculator.tokensToMules(usage.totalTokens, modelTier);
           const platformFee = muleAmount * tokenConfig.fees.platform_fee;
-          const providerAmount = muleAmount - platformFee;
+          const isSelfService = providerId && consumerId.toString() === providerId.toString();
       
-          // Check if this is self-service (same user)
-          const isSelfService = providerId && 
-            consumerId.toString() === providerId.toString();
-      
-          console.log('Processing usage:', {
-            consumerId: consumerId.toString(),
-            providerId: providerId?.toString(),
-            isSelfService,
-            muleAmount,
-            platformFee
-          });
-      
-          // For self-service, we don't charge
-          if (isSelfService) {
-            console.log('Self-service request - no charge');
-            return await Transaction.create({
-              timestamp: new Date(),
-              transactionType: 'self_service',
-              consumerId,
-              providerId,
-              model,
-              modelType,
-              modelTier,
-              rawAmount,
-              muleAmount: TokenCalculator.formatMules(muleAmount),
-              platformFee: 0,
-              metadata: { self_service: true }
-            });
-          }
-      
-          // For regular service, check balance and charge
-          const consumerBalance = await Balance.findOne({ userId: consumerId });
-          if (!consumerBalance || consumerBalance.balance < muleAmount) {
-            throw new Error('Insufficient balance');
-          }
-      
-          // Create transaction
+          // Create single transaction record with all info
           const transaction = await Transaction.create({
             timestamp: new Date(),
-            transactionType: isAnonymous ? 'consumption_anonymous' : 'consumption',
+            transactionType: isSelfService ? 'self_service' : 'consumption',
             consumerId,
             providerId,
             model,
             modelType,
             modelTier,
-            rawAmount,
             muleAmount: TokenCalculator.formatMules(muleAmount),
-            platformFee: TokenCalculator.formatMules(platformFee)
+            platformFee: TokenCalculator.formatMules(platformFee),
+            usage: {
+              promptTokens: usage.promptTokens,
+              completionTokens: usage.completionTokens,
+              totalTokens: usage.totalTokens,
+              duration_seconds: performance.duration_seconds,
+              tokens_per_second: performance.tokens_per_second
+            }
           });
       
-          // Update balances
-          await Promise.all([
-            // Deduct from consumer
-            Balance.findOneAndUpdate(
-              { userId: consumerId },
-              {
-                $inc: { balance: -muleAmount },
-                $set: { lastUpdated: new Date() }
-              }
-            ),
-            // Add to provider if not anonymous
-            !isAnonymous && providerId ? 
-              Balance.findOneAndUpdate(
-                { userId: providerId },
-                {
-                  $inc: { balance: providerAmount },
-                  $set: { lastUpdated: new Date() }
-                },
-                { upsert: true }
-              ) : Promise.resolve()
-          ]);
+          // Update balances if not self-service
+          if (!isSelfService) {
+            await this._updateBalances(consumerId, providerId, muleAmount, platformFee);
+          }
       
           return transaction;
-      
         } catch (error) {
           console.error('Failed to process usage:', error);
           throw error;
         }
     }
+
+    static async updateProviderMetrics(providerId, performance) {
+        try {
+          // Update rolling average of tokens_per_second
+          await Provider.findOneAndUpdate(
+            { userId: providerId },
+            {
+              $push: {
+                'performance.history': {
+                  $each: [{
+                    timestamp: new Date(),
+                    tokens_per_second: performance.tokens_per_second,
+                    duration_seconds: performance.duration_seconds
+                  }],
+                  $slice: -100 // Keep last 100 entries
+                }
+              },
+              $inc: {
+                'performance.total_requests': 1,
+                'performance.total_tokens': performance.total_tokens
+              }
+            },
+            { upsert: true }
+          );
+        } catch (error) {
+          console.error('Failed to update provider metrics:', error);
+        }
+      }
+    
 
     static async getTransactionHistory({
         userId,

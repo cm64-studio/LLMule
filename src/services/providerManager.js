@@ -1,42 +1,84 @@
+// src/services/providerManager.js
 const { v4: uuidv4 } = require('uuid');
 const User = require('../models/userModel');
 const { ModelManager } = require('../config/models');
-
+const Provider = require('../models/providerModel');
+const WebSocket = require('ws');
 class ProviderManager {
   constructor() {
     this.providers = new Map();
     this.pendingRequests = new Map();
     this.requestCounts = new Map();
     this.providerUserIds = new Map();
-    this.heartbeatInterval = 15000; 
-    this.timeoutThreshold = 45000;
+    this.heartbeatInterval = 15000; // 15 seconds
+    this.timeoutThreshold = 45000;  // 45 seconds
+    this.pingIntervals = new Map(); // Track ping intervals per provider
+    this.requestQueue = new Map(); // Track pending requests per provider
+    this.performanceCache = new Map(); // Cache provider performance metrics
+    this.loadBalancingThreshold = 5; // Max requests before load balancing kicks in
+    
     console.log('ProviderManager initialized with heartbeat monitoring');
-    this.startHeartbeatMonitor();
   }
 
-  startHeartbeatMonitor() {
-    setInterval(() => {
-      const now = Date.now();
-      for (const [socketId, provider] of this.providers) {
-        const ws = provider.ws;
+  startHeartbeatMonitor(socketId) {
+    // Clear any existing interval
+    if (this.pingIntervals.has(socketId)) {
+      clearInterval(this.pingIntervals.get(socketId));
+    }
 
-        if (!ws.isAlive) {
-          console.log(`Provider ${socketId} connection lost - removing`);
-          this.removeProvider(socketId);
-          continue;
-        }
+    // Start new heartbeat interval
+    const interval = setInterval(() => {
+      const provider = this.providers.get(socketId);
+      if (!provider || !provider.ws) {
+        this.clearHeartbeat(socketId);
+        return;
+      }
 
-        if (now - provider.lastHeartbeat > this.timeoutThreshold) {
-          provider.status = 'inactive';
-          this.requestCounts.set(socketId, 0);
-          console.log(`Provider ${socketId} marked inactive due to timeout`);
-          continue;
-        }
+      if (Date.now() - provider.lastHeartbeat > this.timeoutThreshold) {
+        console.log(`Provider ${socketId} timed out - removing`);
+        this.removeProvider(socketId);
+        return;
+      }
 
-        ws.isAlive = false;
-        ws.ping();
+      try {
+        provider.ws.ping();
+      } catch (error) {
+        console.error(`Error pinging provider ${socketId}:`, error);
+        this.removeProvider(socketId);
       }
     }, this.heartbeatInterval);
+
+    this.pingIntervals.set(socketId, interval);
+  }
+
+  clearHeartbeat(socketId) {
+    if (this.pingIntervals.has(socketId)) {
+      clearInterval(this.pingIntervals.get(socketId));
+      this.pingIntervals.delete(socketId);
+    }
+  }
+
+  setupWebSocketHandlers(socketId, ws) {
+    // Handle pong responses
+    ws.on('pong', () => {
+      const provider = this.providers.get(socketId);
+      if (provider) {
+        provider.lastHeartbeat = Date.now();
+        provider.status = 'active';
+      }
+    });
+
+    // Handle close
+    ws.on('close', () => {
+      console.log(`Provider ${socketId} WebSocket closed`);
+      this.removeProvider(socketId);
+    });
+
+    // Handle errors
+    ws.on('error', (error) => {
+      console.error(`Provider ${socketId} WebSocket error:`, error);
+      this.removeProvider(socketId);
+    });
   }
 
   handleConnection(ws, providerId) {
@@ -52,132 +94,88 @@ class ProviderManager {
 
 
   async registerProvider(socketId, providerInfo) {
-    console.log('\n=== Provider Registration Debug ===');
-    console.log('Raw provider info:', {
-      socketId,
-      models: providerInfo.models,
-      hasApiKey: !!providerInfo.apiKey
-    });
-    
+    if (!providerInfo.apiKey) {
+      console.error('Provider registration failed: No API key provided');
+      return false;
+    }
+
     try {
-      let userId = null;
-      let formattedModels = [];  // Move declaration outside
-
-      // Format and normalize model names regardless of user authentication
-      formattedModels = providerInfo.models.map(model => {
-        console.log('Processing model:', model);
-        const modelInfo = ModelManager.getModelInfo(model);
-        console.log('Model classification:', {
-          name: model,
-          info: modelInfo
-        });
-
-        // If it's already an object, use it
-        if (typeof model === 'object') {
-          return {
-            name: model.name,
-            type: model.type || 'llm',
-            tier: modelInfo?.tier || 'medium'
-          };
-        }
-        // If it's a string, create an object
-        return {
-          name: model,
-          type: 'llm',
-          tier: modelInfo?.tier || 'medium'
-        };
-      });
-
-      // Handle authenticated users
-      if (providerInfo.apiKey) {
-        const user = await User.findOne({ 
-          apiKey: providerInfo.apiKey,
-          emailVerified: true,
-          status: 'active'
-        });
-  
-        console.log('User lookup result:', {
-          found: !!user,
-          userId: user?._id?.toString(),
-          status: user?.status,
-          verified: user?.emailVerified
-        });
-  
-        if (user) {
-          userId = user._id;
-          
-          console.log('Formatted models:', formattedModels);
-  
-          // Update user's provider status
-          const updatedUser = await User.findByIdAndUpdate(
-            userId,
-            {
-              $set: {
-                'provider.isProvider': true,
-                'provider.models': formattedModels,
-                'provider.lastSeen': new Date()
-              }
-            },
-            { new: true }
-          );
-  
-          console.log('Updated user provider status:', {
-            isProvider: updatedUser.provider.isProvider,
-            modelCount: updatedUser.provider.models.length,
-            models: updatedUser.provider.models
-          });
-  
-        } else {
-          console.error('No valid user found for API key');
-          return false;
-        }
-      }
-  
-      // Store provider information with formatted models
-      const providerData = {
-        ...providerInfo,
-        models: formattedModels, // Use formatted models for all providers
-        userId,
-        lastHeartbeat: Date.now(),
-        status: 'active',
-        readyForRequests: true
-      };
-
-      this.providers.set(socketId, providerData);
-      
-      if (userId) {
-        this.providerUserIds.set(socketId, userId);
-      }
-      
-      this.requestCounts.set(socketId, 0);
-      
-      console.log('Provider registration complete:', {
-        socketId,
-        userId: userId?.toString(),
-        modelCount: formattedModels.length,
-        models: formattedModels,
+      const user = await User.findOne({
+        apiKey: providerInfo.apiKey,
+        emailVerified: true,
         status: 'active'
       });
 
-      // Log current provider state
-      this.logProvidersState();
-  
-      return true;
-  
-    } catch (error) {
-      console.error('Provider registration failed:', {
-        error: error.message,
-        stack: error.stack
+      if (!user) {
+        console.error('Provider registration failed: Invalid or inactive user');
+        return false;
+      }
+
+      // Ensure we have a websocket instance
+      if (!providerInfo.ws) {
+        console.error('Provider registration failed: No WebSocket provided');
+        return false;
+      }
+
+      const providerData = {
+        ...providerInfo,
+        userId: user._id,
+        lastHeartbeat: Date.now(),
+        status: 'active',
+        readyForRequests: true,
+        ws: providerInfo.ws // Make sure this is stored
+      };
+
+      // Store provider data
+      this.providers.set(socketId, providerData);
+      this.providerUserIds.set(socketId, user._id);
+      this.requestCounts.set(socketId, 0);
+
+      // Setup WebSocket handlers
+      this.setupWebSocketHandlers(socketId, providerData.ws);
+      
+      // Start heartbeat monitoring
+      this.startHeartbeatMonitor(socketId);
+
+      console.log('Provider registered successfully:', {
+        socketId,
+        userId: user._id.toString(),
+        hasWebSocket: !!providerData.ws,
+        wsState: providerData.ws.readyState
       });
+
+      return true;
+    } catch (error) {
+      console.error('Provider registration failed:', error);
       return false;
     }
   }
 
+  // Add helper method to get userId from socketId
+  getUserIdFromSocketId(socketId) {
+    return this.providerUserIds.get(socketId);
+  }
+
   removeProvider(socketId) {
     console.log(`Removing provider: ${socketId}`);
+    
+    // Clear heartbeat interval
+    this.clearHeartbeat(socketId);
+    
+    // Clean up provider data
+    const provider = this.providers.get(socketId);
+    if (provider && provider.ws) {
+      try {
+        provider.ws.terminate();
+      } catch (error) {
+        console.error(`Error terminating WebSocket for ${socketId}:`, error);
+      }
+    }
+    
     this.providers.delete(socketId);
     this.providerUserIds.delete(socketId);
     this.requestCounts.delete(socketId);
+    
     this.logProvidersState();
   }
 
@@ -192,122 +190,159 @@ class ProviderManager {
     }
   }
 
-  findAvailableProvider(model = null) {
+  
+
+
+  async findAvailableProvider(model = null) {
     console.log('\n=== Finding Provider Debug ===');
     console.log('Looking for model:', model);
 
-    // Get all active providers
+    // Get active providers with websocket connections
     const eligibleProviders = Array.from(this.providers.entries())
       .filter(([_, provider]) => {
         const isActive = provider.status === 'active';
         const isReady = provider.readyForRequests === true;
-        
-        console.log('Provider status check:', {
-          providerId: _.substring(0, 8),
-          active: isActive,
-          ready: isReady,
-          modelCount: provider.models?.length || 0
-        });
-        
-        return isActive && isReady;
-      })
-      .filter(([_, provider]) => {
-        if (!model) return true;
-        
-        // Check if provider has matching model
-        const hasModel = provider.models.some(providerModel => {
-          // Get model info for both requested and provider model
-          const requestedInfo = ModelManager.getModelInfo(model);
-          const providerModelName = providerModel.name || providerModel;
-          const providerInfo = ModelManager.getModelInfo(providerModelName);
-          
-          console.log('Model comparison:', {
-            requested: {
-              name: model,
-              tier: requestedInfo?.tier
-            },
-            provider: {
-              name: providerModelName,
-              tier: providerInfo?.tier
-            }
-          });
+        const hasWebSocket = provider.ws && provider.ws.readyState === 1; // WebSocket.OPEN equals 1
+        const pendingRequests = this.requestQueue.get(provider.socketId) || 0;
+        const isAvailable = pendingRequests < this.loadBalancingThreshold;
 
-          // Match by exact name or matching tier
-          return providerModelName === model || 
-                 (requestedInfo?.tier && requestedInfo.tier === providerInfo?.tier);
+        console.log('Provider eligibility check:', {
+          providerId: provider.userId?.toString(),
+          isActive,
+          isReady,
+          hasWebSocket,
+          wsState: provider.ws?.readyState,
+          pendingRequests,
+          isAvailable
         });
 
-        console.log('Provider model check:', {
-          providerId: _.substring(0, 8),
-          hasModel,
-          availableModels: provider.models
-        });
-
-        return hasModel;
-      });
+      return isActive && isReady && hasWebSocket && isAvailable;
+    })
 
     if (eligibleProviders.length === 0) {
       console.log('No eligible providers found');
       return null;
     }
 
-    // Add more detailed logging
-    console.log('Eligible providers:', eligibleProviders.map(([id, p]) => ({
-      id: id.substring(0, 8),
-      models: p.models,
-      load: this.requestCounts.get(id) || 0
-    })));
+    try {
+      // Sort providers by performance and load
+      const rankedProviders = await this._rankProviders(eligibleProviders);
+      const selected = rankedProviders[0];
 
-    const providersByLoad = eligibleProviders
-      .map(([socketId, provider]) => ({
-        socketId,
+      // Double check websocket before returning
+      const provider = this.providers.get(selected.socketId);
+      if (!provider?.ws || provider.ws.readyState !== WebSocket.OPEN) {
+        console.error('Selected provider has no valid websocket');
+        return null;
+      }
+
+      // Update request queue
+      const currentQueue = this.requestQueue.get(selected.socketId) || 0;
+      this.requestQueue.set(selected.socketId, currentQueue + 1);
+
+      console.log('Selected provider:', {
+        socketId: selected.socketId,
+        userId: provider.userId,
+        currentLoad: currentQueue + 1,
+        wsState: provider.ws.readyState,
+        performance: this.performanceCache.get(selected.socketId)
+      });
+
+      return {
+        socketId: selected.socketId,
         provider,
-        load: this.requestCounts.get(socketId) || 0
-      }))
-      .sort((a, b) => a.load - b.load);
+        userId: provider.userId
+      };
+    } catch (error) {
+      console.error('Error selecting provider:', error);
+      return null;
+    }
+  }
 
-    const selected = providersByLoad[0];
-    this.requestCounts.set(selected.socketId,
-      (this.requestCounts.get(selected.socketId) || 0) + 1
+  async _rankProviders(providers) {
+    const providerScores = await Promise.all(
+      providers.map(async ([socketId, provider]) => {
+        const performance = this.performanceCache.get(socketId) || 
+          await this._getProviderPerformance(provider.userId);
+        const currentLoad = this.requestQueue.get(socketId) || 0;
+        
+        // Calculate score based on performance and load
+        const performanceScore = performance.tokens_per_second || 0;
+        const loadScore = 1 / (currentLoad + 1); // Lower load = higher score
+        const totalScore = (performanceScore * 0.7) + (loadScore * 0.3);
+
+        return {
+          socketId,
+          provider,
+          score: totalScore
+        };
+      })
     );
 
-    // Find the actual matching model to return
-    const selectedModel = selected.provider.models.find(m => {
-      const mName = m.name || m;
-      return mName === model || 
-             ModelManager.getModelInfo(mName).tier === ModelManager.getModelInfo(model).tier;
-    });
+    // Sort by score (higher is better)
+    return providerScores
+      .sort((a, b) => b.score - a.score)
+      .map(({ socketId, provider }) => ({ socketId, provider }));
+  }
 
-    console.log('Selected provider:', {
-      socketId: selected.socketId.substring(0, 8),
-      currentLoad: this.requestCounts.get(selected.socketId),
-      selectedModel: selectedModel?.name || selectedModel,
-      availableModels: selected.provider.models.map(m => m.name || m)
-    });
+  async _getProviderPerformance(userId) {
+    try {
+      const provider = await Provider.findOne(
+        { userId },
+        { 'performance.history': { $slice: -10 } }
+      );
 
-    return {
-      socketId: selected.socketId,
-      provider: selected.provider,
-      userId: selected.provider.userId,
-      selectedModel: selectedModel?.name || selectedModel // Return just the model name
-    };
+      if (!provider?.performance?.history?.length) {
+        return { tokens_per_second: 0 };
+      }
+
+      // Calculate average performance from recent history
+      const recentPerformance = provider.performance.history;
+      const avgTokensPerSecond = recentPerformance.reduce(
+        (acc, curr) => acc + curr.tokens_per_second, 0
+      ) / recentPerformance.length;
+
+      return { tokens_per_second: avgTokensPerSecond };
+    } catch (error) {
+      console.error('Error getting provider performance:', error);
+      return { tokens_per_second: 0 };
+    }
   }
 
 
   async routeRequest(requestData) {
-    console.log('Routing request for model:', requestData.model);
-    const providerInfo = this.findAvailableProvider(requestData.model);
-
+    console.log('\n=== Routing Request ===');
+    console.log('Request data:', {
+      model: requestData.model,
+      messagesCount: requestData.messages?.length,
+      temperature: requestData.temperature,
+      maxTokens: requestData.max_tokens
+    });
+  
+    // Add await here
+    const providerInfo = await this.findAvailableProvider(requestData.model);
+    
+    console.log('Provider Info:', {
+      found: !!providerInfo,
+      socketId: providerInfo?.socketId,
+      hasWs: !!(providerInfo?.provider?.ws),
+      wsState: providerInfo?.provider?.ws?.readyState
+    });
+  
     if (!providerInfo) {
       throw new Error('No available providers');
     }
-
-    // Use the actual selected model name for the request
-    const actualModelName = providerInfo.selectedModel;
-    if (!actualModelName) {
-      throw new Error('No matching model found');
+  
+    const provider = this.providers.get(providerInfo.socketId);
+    if (!provider || !provider.ws) {
+      console.error('Provider state check:', {
+        hasProvider: !!provider,
+        hasWs: !!(provider?.ws),
+        wsState: provider?.ws?.readyState 
+      });
+      throw new Error('Provider WebSocket not available');
     }
-
+  
     const requestId = uuidv4();
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
@@ -316,35 +351,75 @@ class ProviderManager {
         this.requestCounts.set(providerInfo.socketId, currentCount - 1);
         reject(new Error('Request timeout after 5 minutes'));
       }, 300000);
-
+  
       this.pendingRequests.set(requestId, {
         resolve,
         reject,
         timeout,
         socketId: providerInfo.socketId,
-        providerId: providerInfo.provider.userId
+        providerId: providerInfo.userId
       });
-
-      // Use the actual model name in the request
-      providerInfo.provider.ws.send(JSON.stringify({
-        type: 'completion_request',
-        requestId,
-        ...requestData,
-        model: actualModelName // Override with actual model name
-      }));
-
-      console.log('Sent completion request:', {
-        requestId,
-        model: actualModelName,
-        originalModel: requestData.model
-      });
+  
+      try {
+        const message = {
+          type: 'completion_request',
+          requestId,
+          model: requestData.model,
+          messages: requestData.messages,
+          temperature: requestData.temperature,
+          max_tokens: requestData.max_tokens
+        };
+  
+        console.log('Sending WebSocket message:', {
+          type: message.type,
+          requestId,
+          model: message.model,
+          socketId: providerInfo.socketId
+        });
+  
+        provider.ws.send(JSON.stringify(message), (error) => {
+          if (error) {
+            console.error('WebSocket send error:', error);
+            clearTimeout(timeout);
+            this.pendingRequests.delete(requestId);
+            reject(new Error('Failed to send request to provider'));
+          } else {
+            console.log('WebSocket message sent successfully');
+          }
+        });
+      } catch (error) {
+        console.error('Error sending request:', error);
+        clearTimeout(timeout);
+        this.pendingRequests.delete(requestId);
+        reject(error);
+      }
     });
   }
 
-  handleCompletionResponse(requestId, response) {
-    console.log('\n=== Handling Completion Response ===');
-    console.log('Request ID:', requestId);
+  _matchModelTier(providerModel, requestedModel) {
+    // Get model info from ModelManager
+    const { ModelManager } = require('../config/models');
+    
+    // Handle object or string models
+    const providerModelName = typeof providerModel === 'object' ? 
+      providerModel.name : providerModel;
+    const requestedModelName = typeof requestedModel === 'object' ? 
+      requestedModel.name : requestedModel;
+      
+    try {
+      // Get tier in o for both models
+      const providerModelInfo = ModelManager.getModelInfo(providerModelName);
+      const requestedModelInfo = ModelManager.getModelInfo(requestedModelName);
+      
+      // Match if tiers are the same
+      return providerModelInfo.tier === requestedModelInfo.tier;
+    } catch (error) {
+      console.error('Error matching model tiers:', error);
+      return false;
+    }
+  }
 
+  handleCompletionResponse(requestId, response) {
     const pendingRequest = this.pendingRequests.get(requestId);
     if (!pendingRequest) {
       console.error('No pending request found for ID:', requestId);
@@ -352,27 +427,21 @@ class ProviderManager {
     }
 
     try {
+      // Update request queue count
+      const currentQueue = this.requestQueue.get(pendingRequest.socketId) || 1;
+      this.requestQueue.set(pendingRequest.socketId, Math.max(0, currentQueue - 1));
+
+      // Update performance cache if successful
+      if (response.usage) {
+        this.performanceCache.set(pendingRequest.socketId, {
+          tokens_per_second: response.usage.tokens_per_second,
+          last_updated: Date.now()
+        });
+      }
+
+      // Complete the request
       clearTimeout(pendingRequest.timeout);
       this.pendingRequests.delete(requestId);
-
-      if (pendingRequest.socketId) {
-        const currentCount = this.requestCounts.get(pendingRequest.socketId) || 1;
-        this.requestCounts.set(pendingRequest.socketId, currentCount - 1);
-      }
-
-      if (response.error) {
-        console.error('Error in provider response:', response.error);
-        pendingRequest.reject(new Error(response.error));
-        return;
-      }
-
-      if (!response.choices || !response.choices[0]?.message?.content) {
-        console.error('Invalid response structure:', response);
-        pendingRequest.reject(new Error('Invalid response from provider'));
-        return;
-      }
-
-      console.log('Successfully handled response');
       pendingRequest.resolve(response);
 
     } catch (error) {
