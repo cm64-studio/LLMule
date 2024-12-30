@@ -5,8 +5,6 @@ const { tokenConfig, TokenCalculator } = require('../config/tokenomics');
 const logger = require('../utils/logger');
 
 
-
-
 class TokenService {
     static async _handleProviderBalance(providerId, providerAmount) {
         // Skip balance update for UUID providers (they're anonymous/unregistered)

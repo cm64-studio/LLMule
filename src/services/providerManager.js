@@ -196,18 +196,20 @@ class ProviderManager {
   async findAvailableProvider(model = null) {
     console.log('\n=== Finding Provider Debug ===');
     console.log('Looking for model:', model);
-
-    // Get active providers with websocket connections
+  
+    // Get active providers
     const eligibleProviders = Array.from(this.providers.entries())
       .filter(([_, provider]) => {
         const isActive = provider.status === 'active';
         const isReady = provider.readyForRequests === true;
-        const hasWebSocket = provider.ws && provider.ws.readyState === 1; // WebSocket.OPEN equals 1
+        const hasWebSocket = provider.ws && provider.ws.readyState === 1;
         const pendingRequests = this.requestQueue.get(provider.socketId) || 0;
         const isAvailable = pendingRequests < this.loadBalancingThreshold;
-
+  
+        // Add debug logging
         console.log('Provider eligibility check:', {
           providerId: provider.userId?.toString(),
+          models: provider.models,
           isActive,
           isReady,
           hasWebSocket,
@@ -215,14 +217,15 @@ class ProviderManager {
           pendingRequests,
           isAvailable
         });
-
-      return isActive && isReady && hasWebSocket && isAvailable;
-    })
-
+  
+        return isActive && isReady && hasWebSocket && isAvailable;
+      });
+  
     if (eligibleProviders.length === 0) {
       console.log('No eligible providers found');
       return null;
     }
+  
 
     try {
       // Sort providers by performance and load

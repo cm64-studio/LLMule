@@ -2,128 +2,117 @@
 // scripts/tokenCLI.js
 const { program } = require('commander');
 const mongoose = require('mongoose');
-const TokenService = require('../src/services/tokenService');
 const User = require('../src/models/userModel');
-const { TokenCalculator } = require('../src/config/tokenomics');
+const Transaction = require('../src/models/transactionModel');
+const { tokenConfig, TokenCalculator } = require('../src/config/tokenomics');
+const chalk = require('chalk'); // Add for better CLI output
 require('dotenv').config();
 
 program
   .version('1.0.0')
   .description('LLMule Token Management CLI');
 
-// scripts/tokenCli.js
-
 program
   .command('check-balance')
-  .description('Check user token balance')
+  .description('Check user token balance and usage')
   .requiredOption('-e, --email <email>', 'User email')
   .option('--debug', 'Show debug information')
   .action(async (options) => {
     try {
       await mongoose.connect(process.env.MONGODB_URI);
-      console.log('Connected to MongoDB');
+      console.log(chalk.green('Connected to MongoDB'));
       
       const user = await User.findOne({ email: options.email });
       if (!user) {
-        console.error('User not found');
+        console.error(chalk.red('User not found'));
         process.exit(1);
       }
 
-      console.log('Found user:', user._id.toString());
+      // Get user's transactions
+      const transactions = await Transaction.aggregate([
+        { $match: { consumerId: user._id } },
+        { $sort: { timestamp: -1 } },
+        { $limit: 5 }, // Show last 5 transactions
+        {
+          $group: {
+            _id: null,
+            totalSpent: { $sum: '$muleAmount' },
+            transactions: { $push: '$$ROOT' }
+          }
+        }
+      ]);
+
+      console.log(chalk.bold('\nUser Information'));
+      console.log(`Email: ${user.email}`);
+      console.log(`User ID: ${user._id}`);
+      console.log(`Status: ${user.status}`);
+
+      if (transactions.length > 0) {
+        const { totalSpent, transactions: recentTxs } = transactions[0];
+        
+        console.log(chalk.bold('\nToken Usage'));
+        console.log(`Total MULE spent: ${totalSpent.toFixed(6)}`);
+        
+        console.log(chalk.bold('\nRecent Transactions'));
+        recentTxs.forEach(tx => {
+          console.log(`${new Date(tx.timestamp).toLocaleString()} | ${tx.transactionType} | ${tx.muleAmount.toFixed(6)} MULE | ${tx.model}`);
+        });
+      }
 
       if (options.debug) {
-        // Show all balances for this user
-        const balances = await Balance.find({ userId: user._id });
-        console.log('All balances found:', balances);
+        console.log(chalk.bold('\nDebug Information'));
+        console.log('User object:', user);
+        console.log('Raw transactions:', transactions);
       }
-
-      const balance = await TokenService.getBalance(user._id);
-      if (!balance) {
-        console.log('No balance found - initializing...');
-        await TokenService.initializeBalance(user._id);
-        balance = await TokenService.getBalance(user._id);
-      }
-
-      const availableTokens = {};
-      Object.entries(tokenConfig.conversion_rates).forEach(([tier, rate]) => {
-        availableTokens[tier] = TokenCalculator.mulesToTokens(balance.balance, tier);
-      });
-
-      console.log('\nBalance for', options.email);
-      console.log('User ID:', user._id.toString());
-      console.log('MULE Balance:', balance.balance);
-      console.log('Available Tokens:', availableTokens);
-      console.log('Last Updated:', balance.lastUpdated);
       
       process.exit(0);
     } catch (error) {
-      console.error('Error:', error);
+      console.error(chalk.red('Error:'), error);
       process.exit(1);
     }
   });
 
 program
   .command('add-balance')
-  .description('Add MULE balance to a user')
+  .description('Add MULE tokens to user balance')
   .requiredOption('-e, --email <email>', 'User email')
   .requiredOption('-a, --amount <amount>', 'Amount of MULE tokens')
-  .option('--force', 'Force add even if balance exists')
   .action(async (options) => {
     try {
       await mongoose.connect(process.env.MONGODB_URI);
       
       const user = await User.findOne({ email: options.email });
       if (!user) {
-        console.error('User not found');
+        console.error(chalk.red('User not found'));
         process.exit(1);
       }
 
       const amount = parseFloat(options.amount);
       if (isNaN(amount) || amount <= 0) {
-        console.error('Invalid amount');
+        console.error(chalk.red('Invalid amount'));
         process.exit(1);
       }
 
-      await TokenService.addBalance(user._id, amount);
-      console.log(`Added ${amount} MULE to ${options.email}`);
-      
-      // Verify the new balance
-      const balance = await TokenService.getBalance(user._id);
-      console.log('New balance:', balance.balance, 'MULE');
-      
+      // Create deposit transaction
+      await Transaction.create({
+        timestamp: new Date(),
+        transactionType: 'deposit',
+        consumerId: user._id,
+        model: 'system',
+        modelType: 'llm',
+        modelTier: 'small',
+        muleAmount: amount,
+        platformFee: 0,
+        metadata: {
+          source: 'admin_cli',
+          note: 'Manual balance addition'
+        }
+      });
+
+      console.log(chalk.green(`Added ${amount} MULE to ${options.email}`));
       process.exit(0);
     } catch (error) {
-      console.error('Error:', error);
-      process.exit(1);
-    }
-  });
-
-program
-  .command('set-welcome')
-  .description('Set welcome balance for new users')
-  .requiredOption('-a, --amount <amount>', 'Amount of MULE tokens')
-  .action(async (options) => {
-    try {
-      const amount = parseFloat(options.amount);
-      if (isNaN(amount) || amount < 0) {
-        throw new Error('Invalid amount');
-      }
-
-      // Update tokenomics config
-      const configPath = require.resolve('../config/tokenomics');
-      const fs = require('fs');
-      let content = fs.readFileSync(configPath, 'utf8');
-      
-      content = content.replace(
-        /welcome_amount:\s*[\d.]+/,
-        `welcome_amount: ${amount}`
-      );
-
-      fs.writeFileSync(configPath, content);
-      console.log(`Welcome balance set to ${amount} MULE`);
-      process.exit(0);
-    } catch (error) {
-      console.error('Error:', error);
+      console.error(chalk.red('Error:'), error);
       process.exit(1);
     }
   });
@@ -141,25 +130,52 @@ program
       const startDate = options.start ? new Date(options.start) : new Date(0);
       const endDate = options.end ? new Date(options.end) : new Date();
 
-      const transactions = await TokenService.getSystemStats(startDate, endDate);
-      
+      const stats = await Transaction.aggregate([
+        {
+          $match: {
+            timestamp: { $gte: startDate, $lte: endDate },
+            transactionType: { $in: ['consumption', 'self_service'] }
+          }
+        },
+        {
+          $group: {
+            _id: {
+              date: { $dateToString: { format: '%Y-%m-%d', date: '$timestamp' } },
+              modelTier: '$modelTier'
+            },
+            totalMule: { $sum: '$muleAmount' },
+            totalFees: { $sum: '$platformFee' },
+            requestCount: { $sum: 1 },
+            uniqueUsers: { $addToSet: '$consumerId' }
+          }
+        },
+        { $sort: { '_id.date': 1 } }
+      ]);
+
       if (options.output) {
         const csv = [
-          'Date,Transactions,Total MULE,Platform Fees,Active Users',
-          ...transactions.map(t => 
-            `${t.date},${t.count},${t.totalMule},${t.fees},${t.activeUsers}`
+          'Date,Model Tier,Transactions,Total MULE,Platform Fees,Unique Users',
+          ...stats.map(s => 
+            `${s._id.date},${s._id.modelTier},${s.requestCount},${s.totalMule.toFixed(6)},${s.totalFees.toFixed(6)},${s.uniqueUsers.length}`
           )
         ].join('\n');
 
         require('fs').writeFileSync(options.output, csv);
-        console.log(`Report saved to ${options.output}`);
+        console.log(chalk.green(`Report saved to ${options.output}`));
       } else {
-        console.table(transactions);
+        console.table(stats.map(s => ({
+          Date: s._id.date,
+          Tier: s._id.modelTier,
+          Requests: s.requestCount,
+          'Total MULE': s.totalMule.toFixed(6),
+          'Platform Fees': s.totalFees.toFixed(6),
+          'Unique Users': s.uniqueUsers.length
+        })));
       }
 
       process.exit(0);
     } catch (error) {
-      console.error('Error:', error);
+      console.error(chalk.red('Error:'), error);
       process.exit(1);
     }
   });

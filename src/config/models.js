@@ -144,35 +144,68 @@ const modelConfig = {
 };
 
 class ModelManager {
+  static _normalizeModelName(modelName) {
+    // Handle cases where modelName is null/undefined
+    if (!modelName) return '';
+    
+    // Convert to string and lowercase
+    const name = modelName.toString().toLowerCase();
+    
+    // Remove version tags for pattern matching
+    return name.split(':')[0]   // Handle :latest, :v1, etc
+              .split('@')[0]    // Handle @version
+              .split('/')[1] || name; // Handle namespace/model
+  }
+  
   static getModelInfo(modelName) {
     console.log('Getting model info for:', modelName);
     
-    // Handle cases where modelName is an object or has special characters
-    const normalizedName = typeof modelName === 'object' 
-      ? modelName.name?.toLowerCase() 
-      : modelName?.toLowerCase();
-
+    // Normalize the model name first
+    const normalizedName = this._normalizeModelName(modelName);
+    
     if (!normalizedName) {
       console.warn('Invalid model name:', modelName);
-      return ModelManager.createModelInfo('medium'); // Changed to static call
+      return this.createModelInfo('medium');
     }
-
-    // Handle vanilj/phi-4 specifically
-    if (normalizedName.includes('phi-4')) {
-      return ModelManager.createModelInfo('large'); // Changed to static call
+  
+    // Handle phi models specially
+    if (normalizedName.includes('phi')) {
+      const version = normalizedName.match(/\d+/)?.[0];
+      if (version) {
+        switch (version) {
+          case '1':
+          case '2': return this.createModelInfo('small');
+          case '3': return this.createModelInfo('medium');
+          case '4': return this.createModelInfo('large');
+          default: return this.createModelInfo('medium');
+        }
+      }
     }
-
+  
     // Try pattern matching for size
     for (const [tier, patterns] of Object.entries(modelConfig.sizePatterns)) {
       for (const pattern of patterns) {
         if (pattern.test(normalizedName)) {
-          return ModelManager.createModelInfo(tier); // Changed to static call
+          return this.createModelInfo(tier);
         }
       }
     }
-
-    console.warn(`Unrecognized model pattern: ${modelName}`);
-    return ModelManager.createModelInfo('medium'); // Changed to static call
+  
+    // Check model families
+    for (const [family, config] of Object.entries(modelConfig.modelFamilies)) {
+      if (normalizedName.includes(family)) {
+        if (typeof config === 'string') {
+          return this.createModelInfo(config);
+        } else {
+          // For families with version-specific tiers
+          const version = normalizedName.match(/\d+b?/)?.[0];
+          return this.createModelInfo(config[version] || 'medium');
+        }
+      }
+    }
+  
+    console.warn(`Unrecognized model pattern: ${modelName}, defaulting to medium`);
+    return this.createModelInfo('medium');
   }
 
   // Changed to static method and renamed without underscore
