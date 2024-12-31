@@ -15,27 +15,28 @@ const modelConfig = {
       /3\.?[0-9]?b/i,    // 3B variants
       /tiny/i,           // TinyLlama etc
       /small/i,          // Small variants
-      /phi-2/i,          // Phi-2 specific
-      /phi-v2/i,         // Phi variants
+      /phi-?2/i,         // Phi-2 specific
+      /phi-?v2/i,        // Phi variants
+      /phi3:?mini/i,     // Phi3 mini variant
+      /:?mini/i,         // Other mini variants
     ],
     medium: [
       /7\.?[0-9]?b/i,    // 7B variants (Mistral, Llama2 etc)
+      /mistral/i,        // Mistral variants
+      /openhermes/i,     // OpenHermes (usually 7B)
       /8\.?[0-9]?b/i,    // 8B variants
-      /mistral-?7b/i,    // Specific Mistral mentions
       /13\.?[0-9]?b/i,   // 13B variants
-      /vicuna-?13b/i,    // Specific Vicuna mentions
     ],
     large: [
+      /phi-?4/i,         // Phi-4 model
+      /mixtral/i,        // Mixtral models
       /14\.?[0-9]?b/i,   // 14B variants
       /20\.?[0-9]?b/i,   // 20B variants
-      /mixtral/i,        // Mixtral-8x7B (equivalent to ~47B)
       /30\.?[0-9]?b/i,   // 30B variants
     ],
     xl: [
-      /33\.?[0-9]?b/i,   // 33B variants
       /65\.?[0-9]?b/i,   // 65B variants
-      /70\.?[0-9]?b/i,   // 70B variants (Llama2)
-      /claude-?2/i,      // Claude-2 equivalent models
+      /70\.?[0-9]?b/i,   // 70B variants
     ]
   },
 
@@ -145,44 +146,36 @@ const modelConfig = {
 
 class ModelManager {
   static _normalizeModelName(modelName) {
-    // Handle cases where modelName is null/undefined
+    // Handle direct tier requests
+    if (['small', 'medium', 'large', 'xl'].includes(modelName?.toLowerCase())) {
+      return modelName.toLowerCase();
+    }
+
+    // Handle non-string or empty inputs
     if (!modelName) return '';
     
     // Convert to string and lowercase
     const name = modelName.toString().toLowerCase();
     
-    // Remove version tags for pattern matching
-    return name.split(':')[0]   // Handle :latest, :v1, etc
-              .split('@')[0]    // Handle @version
-              .split('/')[1] || name; // Handle namespace/model
+    // Handle various model name formats
+    const cleanName = name
+      .split(':')[0]         // Remove version tags
+      .split('@')[0]         // Remove version numbers
+      .split('/').pop() ||   // Get last part of path
+      name;                  // Fallback to original
+      
+    return cleanName;
   }
   
   static getModelInfo(modelName) {
-    console.log('Getting model info for:', modelName);
-    
-    // Normalize the model name first
     const normalizedName = this._normalizeModelName(modelName);
     
-    if (!normalizedName) {
-      console.warn('Invalid model name:', modelName);
-      return this.createModelInfo('medium');
+    // Direct tier request
+    if (['small', 'medium', 'large', 'xl'].includes(normalizedName)) {
+      return this.createModelInfo(normalizedName);
     }
-  
-    // Handle phi models specially
-    if (normalizedName.includes('phi')) {
-      const version = normalizedName.match(/\d+/)?.[0];
-      if (version) {
-        switch (version) {
-          case '1':
-          case '2': return this.createModelInfo('small');
-          case '3': return this.createModelInfo('medium');
-          case '4': return this.createModelInfo('large');
-          default: return this.createModelInfo('medium');
-        }
-      }
-    }
-  
-    // Try pattern matching for size
+
+    // Pattern matching for size/tier
     for (const [tier, patterns] of Object.entries(modelConfig.sizePatterns)) {
       for (const pattern of patterns) {
         if (pattern.test(normalizedName)) {
@@ -190,46 +183,29 @@ class ModelManager {
         }
       }
     }
-  
-    // Check model families
-    for (const [family, config] of Object.entries(modelConfig.modelFamilies)) {
-      if (normalizedName.includes(family)) {
-        if (typeof config === 'string') {
-          return this.createModelInfo(config);
-        } else {
-          // For families with version-specific tiers
-          const version = normalizedName.match(/\d+b?/)?.[0];
-          return this.createModelInfo(config[version] || 'medium');
-        }
-      }
-    }
-  
-    console.warn(`Unrecognized model pattern: ${modelName}, defaulting to medium`);
+
+    // Default to medium if no match found
+    console.warn(`Model size not determined for: ${modelName}, defaulting to medium`);
     return this.createModelInfo('medium');
   }
 
   // Changed to static method and renamed without underscore
   static createModelInfo(tier) {
-    // Create standard model info based on tier
-    const requirements = {
-      small: { ram: '4GB', gpu: false },
-      medium: { ram: '8GB', gpu: '8GB VRAM' },
-      large: { ram: '16GB', gpu: '16GB VRAM' },
-      xl: { ram: '32GB', gpu: '32GB VRAM' }
-    };
-
-    const contexts = {
-      small: 4096,
-      medium: 8192,
-      large: 32768,
-      xl: 32768
-    };
-
     return {
       tier,
-      context: contexts[tier] || 8192,
-      requirements: requirements[tier] || requirements.medium,
-      type: 'llm'
+      type: 'llm',
+      context: {
+        small: 4096,
+        medium: 8192,
+        large: 32768,
+        xl: 32768
+      }[tier] || 8192,
+      requirements: {
+        small: { ram: '4GB', gpu: false },
+        medium: { ram: '8GB', gpu: '8GB VRAM' },
+        large: { ram: '16GB', gpu: '16GB VRAM' },
+        xl: { ram: '32GB', gpu: '32GB VRAM' }
+      }[tier] || { ram: '8GB', gpu: '8GB VRAM' }
     };
   }
 }

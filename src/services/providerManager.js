@@ -193,32 +193,38 @@ class ProviderManager {
   
 
 
-  async findAvailableProvider(model = null) {
+  async findAvailableProvider(requestedModel) {
     console.log('\n=== Finding Provider Debug ===');
-    console.log('Looking for model:', model);
+    console.log('Looking for model:', requestedModel);
   
-    // Get active providers
+    // Get all eligible providers
     const eligibleProviders = Array.from(this.providers.entries())
-      .filter(([_, provider]) => {
+      .filter(([socketId, provider]) => {
         const isActive = provider.status === 'active';
         const isReady = provider.readyForRequests === true;
-        const hasWebSocket = provider.ws && provider.ws.readyState === 1;
-        const pendingRequests = this.requestQueue.get(provider.socketId) || 0;
-        const isAvailable = pendingRequests < this.loadBalancingThreshold;
+        const hasWebSocket = provider.ws && provider.ws.readyState === WebSocket.OPEN;
+        const currentLoad = this.requestQueue.get(socketId) || 0;
+        const isAvailable = currentLoad < this.loadBalancingThreshold;
   
-        // Add debug logging
+        // Check if provider has compatible model
+        const hasCompatibleModel = provider.models.some(model => {
+          const modelInfo = ModelManager.getModelInfo(model);
+          const requestedInfo = ModelManager.getModelInfo(requestedModel);
+          return modelInfo.tier === requestedInfo.tier;
+        });
+  
         console.log('Provider eligibility check:', {
-          providerId: provider.userId?.toString(),
+          socketId,
           models: provider.models,
           isActive,
           isReady,
           hasWebSocket,
-          wsState: provider.ws?.readyState,
-          pendingRequests,
-          isAvailable
+          currentLoad,
+          isAvailable,
+          hasCompatibleModel
         });
   
-        return isActive && isReady && hasWebSocket && isAvailable;
+        return isActive && isReady && hasWebSocket && isAvailable && hasCompatibleModel;
       });
   
     if (eligibleProviders.length === 0) {
@@ -226,40 +232,69 @@ class ProviderManager {
       return null;
     }
   
-
-    try {
-      // Sort providers by performance and load
-      const rankedProviders = await this._rankProviders(eligibleProviders);
-      const selected = rankedProviders[0];
-
-      // Double check websocket before returning
-      const provider = this.providers.get(selected.socketId);
-      if (!provider?.ws || provider.ws.readyState !== WebSocket.OPEN) {
-        console.error('Selected provider has no valid websocket');
-        return null;
-      }
-
-      // Update request queue
-      const currentQueue = this.requestQueue.get(selected.socketId) || 0;
-      this.requestQueue.set(selected.socketId, currentQueue + 1);
-
-      console.log('Selected provider:', {
-        socketId: selected.socketId,
-        userId: provider.userId,
-        currentLoad: currentQueue + 1,
-        wsState: provider.ws.readyState,
-        performance: this.performanceCache.get(selected.socketId)
-      });
-
-      return {
-        socketId: selected.socketId,
-        provider,
-        userId: provider.userId
-      };
-    } catch (error) {
-      console.error('Error selecting provider:', error);
-      return null;
-    }
+    // Sort providers by load and pick the one with least load
+    const sortedProviders = eligibleProviders.sort(([idA], [idB]) => {
+      const loadA = this.requestQueue.get(idA) || 0;
+      const loadB = this.requestQueue.get(idB) || 0;
+      return loadA - loadB;
+    });
+  
+    // Get performance metrics for top 3 least loaded providers
+    const topProviders = await Promise.all(
+      sortedProviders.slice(0, 3).map(async ([socketId, provider]) => {
+        const performance = await this._getProviderPerformance(provider.userId);
+        return {
+          socketId,
+          provider,
+          load: this.requestQueue.get(socketId) || 0,
+          performance
+        };
+      })
+    );
+  
+    // Score providers based on load and performance
+    const scoredProviders = topProviders.map(p => ({
+      ...p,
+      score: this._calculateProviderScore(p.load, p.performance.tokens_per_second)
+    }));
+  
+    // Select the provider with the best score
+    const selected = scoredProviders.reduce((best, current) => 
+      current.score > best.score ? current : best
+    );
+  
+    // Update request queue for selected provider
+    const currentQueue = this.requestQueue.get(selected.socketId) || 0;
+    this.requestQueue.set(selected.socketId, currentQueue + 1);
+  
+    console.log('Selected provider:', {
+      socketId: selected.socketId,
+      userId: selected.provider.userId,
+      currentLoad: currentQueue + 1,
+      score: selected.score,
+      performance: selected.performance
+    });
+  
+    return {
+      socketId: selected.socketId,
+      provider: selected.provider,
+      userId: selected.provider.userId
+    };
+  }
+  
+  _calculateProviderScore(load, tokensPerSecond) {
+    // Normalize load (0-1 where 0 is best)
+    const normalizedLoad = load / this.loadBalancingThreshold;
+    
+    // Normalize performance (0-1 where 1 is best)
+    const normalizedPerformance = Math.min(tokensPerSecond / 100, 1);
+    
+    // Weight factors (adjust these based on priorities)
+    const loadWeight = 0.6;
+    const performanceWeight = 0.4;
+    
+    // Calculate final score (0-1 where 1 is best)
+    return (1 - normalizedLoad) * loadWeight + normalizedPerformance * performanceWeight;
   }
 
   async _rankProviders(providers) {

@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 
 const outputFilePath = path.join(__dirname, 'exported-files.txt');
-const extensions = ['.js', 'package.json'];
+const extensions = ['.js', 'package.json','.env'];
 const projectDir = __dirname;
 
 function readFiles(dir) {

@@ -1,31 +1,44 @@
 // src/services/authService.js
 const User = require('../models/userModel');
 const emailService = require('./emailService');
-const crypto = require('node:crypto'); // Changed this line
 
 class AuthService {
   async registerUser(email) {
     // Check if user exists
     let user = await User.findOne({ email });
     if (user) {
-      throw new Error('Email already registered');
+      console.log('User found:', email);
+      //send the current api key to the user
+      const apiKey = user.apiKey;
+      await emailService.sendWelcomeEmail(email, apiKey);
+      return {
+        message: 'Welcome back! Check your email for your API key.',
+        apiKey
+      };
+      
     }
 
-    // Create new user
-    user = new User({ email });
-    user.apiKey = user.generateApiKey();
-    const verificationToken = user.generateEmailVerificationToken();
+    // Create new user with auto-verified status
+    user = new User({ 
+      email,
+      emailVerified: true // Auto-verify since we're sending API key directly
+    });
+    
+    // Generate API key
+    const apiKey = user.generateApiKey();
+    user.apiKey = apiKey;
     
     await user.save();
     console.log('User registered:', user);
     
-    // Send verification email
-    console.log('Sending verification email to:', email);
-    await emailService.sendVerificationEmail(email, verificationToken);
-    console.log('Email sent');
+    // Send welcome email with API key
+    console.log('Sending welcome email to:', email);
+    await emailService.sendWelcomeEmail(email, apiKey);
+    console.log('Welcome email sent');
+
     return {
-      message: 'Registration successful. Please check your email for verification.',
-      apiKey: user.apiKey
+      message: 'Registration successful. Check your email for your API key.',
+      apiKey // Return API key in response
     };
   }
 
