@@ -12,6 +12,7 @@ class BalanceController {
                 message: 'User ID not found'
             });
         }
+        console.log('BalanceController.getBalance called for user:', req.user._id);
 
         // Get or initialize balance
         const balance = await TokenService.getBalance(req.user._id);

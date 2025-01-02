@@ -157,71 +157,70 @@ const modelConfig = {
 };
 
 class ModelManager {
-  static _normalizeModelName(modelName) {
-    // Handle direct tier requests
-    if (['small', 'medium', 'large', 'xl'].includes(modelName?.toLowerCase())) {
-      return modelName.toLowerCase();
-    }
+  // static _normalizeModelName(modelName) {
+  //   // Handle direct tier requests
+  //   if (['small', 'medium', 'large', 'xl'].includes(modelName?.toLowerCase())) {
+  //     return modelName.toLowerCase();
+  //   }
 
-    // Handle non-string or empty inputs
-    if (!modelName) return '';
+  //   // Handle non-string or empty inputs
+  //   if (!modelName) return '';
 
-    // Convert to string and lowercase
-    const name = modelName.toString().toLowerCase();
+  //   // Convert to string and lowercase
+  //   const name = modelName.toString().toLowerCase();
 
-    // Handle various model name formats
-    const cleanName = name
-      .split(':')[0]         // Remove version tags
-      .split('@')[0]         // Remove version numbers
-      .split('/').pop() ||   // Get last part of path
-      name;                  // Fallback to original
+  //   // Handle various model name formats
+  //   const cleanName = name
+  //     .split(':')[0]         // Remove version tags
+  //     .split('@')[0]         // Remove version numbers
+  //     .split('/').pop() ||   // Get last part of path
+  //     name;                  // Fallback to original
 
-    return cleanName;
-  }
+  //   return cleanName;
+  // }
 
   static getModelInfo(modelName) {
-    const normalizedName = this._normalizeModelName(modelName);
-
+    if (!modelName) return this.createModelInfo('medium');
+    
+    console.log('Getting model info for:', modelName);
+  
     // Direct tier request
-    if (['small', 'medium', 'large', 'xl'].includes(normalizedName)) {
-      return this.createModelInfo(normalizedName);
+    if (['small', 'medium', 'large', 'xl'].includes(modelName.toLowerCase())) {
+      console.log('Direct tier request:', modelName);
+      return this.createModelInfo(modelName.toLowerCase());
     }
-
-    // Check known models first
-    if (modelConfig.knownModels[normalizedName]) {
-      return this.createModelInfo(modelConfig.knownModels[normalizedName]);
+  
+    // Check for mini variants first (they're always small)
+    if (modelName.toLowerCase().includes('mini')) {
+      console.log('Mini model detected:', modelName);
+      return this.createModelInfo('small');
     }
-
-    // Check model families
-    const [family, variant] = normalizedName.split(/[-:\/]/);
+  
+    // Check known model families
+    const family = modelName.toLowerCase().split(/[-:\/]/)[0];
     if (modelConfig.modelFamilies[family]) {
       if (typeof modelConfig.modelFamilies[family] === 'string') {
         return this.createModelInfo(modelConfig.modelFamilies[family]);
       }
-      
-      // Handle nested family structures (like phi3:mini)
+      // Handle nested configurations
       if (typeof modelConfig.modelFamilies[family] === 'object') {
+        const variant = modelName.toLowerCase().split(/[-:\/]/)[1];
         if (variant && modelConfig.modelFamilies[family][variant]) {
-          if (typeof modelConfig.modelFamilies[family][variant] === 'object') {
-            // Handle sub-variants like phi3:mini
-            const subVariant = normalizedName.includes('mini') ? 'mini' : 'default';
-            return this.createModelInfo(modelConfig.modelFamilies[family][variant][subVariant]);
-          }
           return this.createModelInfo(modelConfig.modelFamilies[family][variant]);
         }
       }
     }
-
-    // Pattern matching for size/tier as fallback
+  
+    // Pattern matching for size/tier
     for (const [tier, patterns] of Object.entries(modelConfig.sizePatterns)) {
       for (const pattern of patterns) {
-        if (pattern.test(normalizedName)) {
+        if (pattern.test(modelName.toLowerCase())) {
           return this.createModelInfo(tier);
         }
       }
     }
-
-    // If no match found, warn and default to medium
+  
+    // Default to medium if no match found
     console.warn(`Model size not determined for: ${modelName}, defaulting to medium`);
     return this.createModelInfo('medium');
   }
@@ -232,29 +231,29 @@ class ModelManager {
     if (!modelName) return false;
 
     // Normalize model name
-    const normalizedName = this._normalizeModelName(modelName);
+    //const normalizedName = this._normalizeModelName(modelName);
 
     // Direct tier requests are valid
-    if (['small', 'medium', 'large', 'xl'].includes(normalizedName)) {
+    if (['small', 'medium', 'large', 'xl'].includes(modelName)) {
       return true;
     }
 
     // Check if model exists in known models
-    if (modelConfig.models[normalizedName]) {
+    if (modelConfig.models[modelName]) {
       return true;
     }
 
     // Check against size patterns
     for (const [tier, patterns] of Object.entries(modelConfig.sizePatterns)) {
       for (const pattern of patterns) {
-        if (pattern.test(normalizedName)) {
+        if (pattern.test(modelName)) {
           return true;
         }
       }
     }
 
     // Check against model families
-    const [family, variant] = normalizedName.split(/[-/]/);
+    const [family, variant] = modelName.split(/[-/]/);
     if (modelConfig.modelFamilies[family]) {
       if (typeof modelConfig.modelFamilies[family] === 'string') {
         return true;

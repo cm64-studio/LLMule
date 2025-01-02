@@ -16,7 +16,7 @@ class ProviderManager {
     this.requestQueue = new Map(); // Track pending requests per provider
     this.performanceCache = new Map(); // Cache provider performance metrics
     this.loadBalancingThreshold = 5; // Max requests before load balancing kicks in
-    
+
     console.log('ProviderManager initialized with heartbeat monitoring');
   }
 
@@ -123,7 +123,7 @@ class ProviderManager {
         lastHeartbeat: Date.now(),
         status: 'active',
         readyForRequests: true,
-        ws: providerInfo.ws // Make sure this is stored
+        ws: providerInfo.ws
       };
 
       // Store provider data
@@ -137,13 +137,20 @@ class ProviderManager {
       // Start heartbeat monitoring
       this.startHeartbeatMonitor(socketId);
 
+      // Log registration with proper array format
       console.log('Provider registered successfully:', {
         socketId,
         userId: user._id.toString(),
         hasWebSocket: !!providerData.ws,
         wsState: providerData.ws.readyState,
-        models: providerData.models.join(', ')
+        models: providerData.models // Log the array directly
       });
+
+      // Debug log model tiers
+      console.log('Registered models tiers:', providerData.models.map(model => ({
+        model,
+        tier: ModelManager.getModelInfo(model).tier
+      })));
 
       return true;
     } catch (error) {
@@ -159,10 +166,10 @@ class ProviderManager {
 
   removeProvider(socketId) {
     console.log(`Removing provider: ${socketId}`);
-    
+
     // Clear heartbeat interval
     this.clearHeartbeat(socketId);
-    
+
     // Clean up provider data
     const provider = this.providers.get(socketId);
     if (provider && provider.ws) {
@@ -172,11 +179,11 @@ class ProviderManager {
         console.error(`Error terminating WebSocket for ${socketId}:`, error);
       }
     }
-    
+
     this.providers.delete(socketId);
     this.providerUserIds.delete(socketId);
     this.requestCounts.delete(socketId);
-    
+
     this.logProvidersState();
   }
 
@@ -191,13 +198,15 @@ class ProviderManager {
     }
   }
 
-  
 
+
+
+  // In providerManager.js
 
   async findAvailableProvider(requestedModel) {
     console.log('\n=== Finding Provider Debug ===');
     console.log('Looking for model:', requestedModel);
-  
+
     // Get all active providers
     const eligibleProviders = Array.from(this.providers.entries())
       .filter(([socketId, provider]) => {
@@ -206,10 +215,10 @@ class ProviderManager {
         const hasWebSocket = provider.ws && provider.ws.readyState === WebSocket.OPEN;
         const currentLoad = this.requestQueue.get(socketId) || 0;
         const isAvailable = currentLoad < this.loadBalancingThreshold;
-  
+
         // Check if provider has the exact model or compatible tier
         const hasCompatibleModel = this._checkModelCompatibility(provider.models, requestedModel);
-  
+
         console.log('Provider eligibility check:', {
           socketId,
           models: provider.models,
@@ -221,30 +230,30 @@ class ProviderManager {
           hasCompatibleModel,
           requestedModel
         });
-  
+
         return isActive && isReady && hasWebSocket && isAvailable && hasCompatibleModel;
       });
-  
+
     if (eligibleProviders.length === 0) {
       console.log('No eligible providers found');
       return null;
     }
-  
+
     // First, try to find providers with exact model match
-    const exactMatches = eligibleProviders.filter(([_, provider]) => 
+    const exactMatches = eligibleProviders.filter(([_, provider]) =>
       provider.models.some(m => this._isExactModelMatch(m, requestedModel))
     );
-  
+
     // Use exact matches if available, otherwise use tier-compatible providers
     const matchingProviders = exactMatches.length > 0 ? exactMatches : eligibleProviders;
-  
+
     // Sort and select best provider based on load and performance
     const selected = await this._selectOptimalProvider(matchingProviders);
-  
+
     // Update request queue for selected provider
     const currentQueue = this.requestQueue.get(selected.socketId) || 0;
     this.requestQueue.set(selected.socketId, currentQueue + 1);
-  
+
     console.log('Selected provider:', {
       socketId: selected.socketId,
       userId: selected.provider.userId,
@@ -253,7 +262,7 @@ class ProviderManager {
       performance: selected.performance,
       models: selected.provider.models
     });
-  
+
     return {
       socketId: selected.socketId,
       provider: selected.provider,
@@ -262,12 +271,25 @@ class ProviderManager {
   }
 
   _checkModelCompatibility(providerModels, requestedModel) {
+    console.log('Checking compatibility:', {
+      providerModels,
+      requestedModel
+    });
+  
     // If it's a tier request (small, medium, large, xl)
     if (['small', 'medium', 'large', 'xl'].includes(requestedModel)) {
-      return providerModels.some(model => {
+      const hasCompatibleModel = providerModels.some(model => {
         const modelInfo = ModelManager.getModelInfo(model);
-        return modelInfo.tier === requestedModel;
+        const isCompatible = modelInfo.tier === requestedModel;
+        console.log('Tier compatibility check:', {
+          model,
+          tier: modelInfo.tier,
+          requestedTier: requestedModel,
+          isCompatible
+        });
+        return isCompatible;
       });
+      return hasCompatibleModel;
     }
     
     // For specific model requests, first try exact match
@@ -293,18 +315,18 @@ class ProviderManager {
   
     return normalizedProvider === normalizedRequested;
   }
-  
+
   _calculateProviderScore(load, tokensPerSecond) {
     // Normalize load (0-1 where 0 is best)
     const normalizedLoad = load / this.loadBalancingThreshold;
-    
+
     // Normalize performance (0-1 where 1 is best)
     const normalizedPerformance = Math.min(tokensPerSecond / 100, 1);
-    
+
     // Weight factors (adjust these based on priorities)
     const loadWeight = 0.6;
     const performanceWeight = 0.4;
-    
+
     // Calculate final score (0-1 where 1 is best)
     return (1 - normalizedLoad) * loadWeight + normalizedPerformance * performanceWeight;
   }
@@ -326,6 +348,7 @@ class ProviderManager {
         };
       })
     );
+  
     // Select the provider with the best score
     return scoredProviders.reduce((best, current) => 
       current.score > best.score ? current : best
@@ -335,10 +358,10 @@ class ProviderManager {
   async _rankProviders(providers) {
     const providerScores = await Promise.all(
       providers.map(async ([socketId, provider]) => {
-        const performance = this.performanceCache.get(socketId) || 
+        const performance = this.performanceCache.get(socketId) ||
           await this._getProviderPerformance(provider.userId);
         const currentLoad = this.requestQueue.get(socketId) || 0;
-        
+
         // Calculate score based on performance and load
         const performanceScore = performance.tokens_per_second || 0;
         const loadScore = 1 / (currentLoad + 1); // Lower load = higher score
@@ -391,31 +414,31 @@ class ProviderManager {
       temperature: requestData.temperature,
       maxTokens: requestData.max_tokens
     });
-  
+
     // Add await here
     const providerInfo = await this.findAvailableProvider(requestData.model);
-    
+
     console.log('Provider Info:', {
       found: !!providerInfo,
       socketId: providerInfo?.socketId,
       hasWs: !!(providerInfo?.provider?.ws),
       wsState: providerInfo?.provider?.ws?.readyState
     });
-  
+
     if (!providerInfo) {
       throw new Error('No available providers');
     }
-  
+
     const provider = this.providers.get(providerInfo.socketId);
     if (!provider || !provider.ws) {
       console.error('Provider state check:', {
         hasProvider: !!provider,
         hasWs: !!(provider?.ws),
-        wsState: provider?.ws?.readyState 
+        wsState: provider?.ws?.readyState
       });
       throw new Error('Provider WebSocket not available');
     }
-  
+
     const requestId = uuidv4();
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
@@ -424,7 +447,7 @@ class ProviderManager {
         this.requestCounts.set(providerInfo.socketId, currentCount - 1);
         reject(new Error('Request timeout after 5 minutes'));
       }, 300000);
-  
+
       this.pendingRequests.set(requestId, {
         resolve,
         reject,
@@ -432,7 +455,7 @@ class ProviderManager {
         socketId: providerInfo.socketId,
         providerId: providerInfo.userId
       });
-  
+
       try {
         const message = {
           type: 'completion_request',
@@ -442,14 +465,14 @@ class ProviderManager {
           temperature: requestData.temperature,
           max_tokens: requestData.max_tokens
         };
-  
+
         console.log('Sending WebSocket message:', {
           type: message.type,
           requestId,
           model: message.model,
           socketId: providerInfo.socketId
         });
-  
+
         provider.ws.send(JSON.stringify(message), (error) => {
           if (error) {
             console.error('WebSocket send error:', error);
@@ -472,18 +495,18 @@ class ProviderManager {
   _matchModelTier(providerModel, requestedModel) {
     // Get model info from ModelManager
     const { ModelManager } = require('../config/models');
-    
+
     // Handle object or string models
-    const providerModelName = typeof providerModel === 'object' ? 
+    const providerModelName = typeof providerModel === 'object' ?
       providerModel.name : providerModel;
-    const requestedModelName = typeof requestedModel === 'object' ? 
+    const requestedModelName = typeof requestedModel === 'object' ?
       requestedModel.name : requestedModel;
-      
+
     try {
       // Get tier in o for both models
       const providerModelInfo = ModelManager.getModelInfo(providerModelName);
       const requestedModelInfo = ModelManager.getModelInfo(requestedModelName);
-      
+
       // Match if tiers are the same
       return providerModelInfo.tier === requestedModelInfo.tier;
     } catch (error) {

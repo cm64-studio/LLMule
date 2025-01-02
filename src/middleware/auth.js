@@ -7,12 +7,12 @@ const authenticateApiKey = async (req, res, next) => {
                   (req.headers.authorization?.startsWith('Bearer ') ? 
                    req.headers.authorization.substring(7) : null);
 
-    console.log('Auth debug:', {
-      headers: req.headers,
-      extractedApiKey: apiKey ? `${apiKey.substring(0, 10)}...` : null,
-      authMethod: req.headers['x-api-key'] ? 'x-api-key' : 
-                 req.headers.authorization ? 'bearer' : 'none'
-    });
+    // console.log('Auth debug:', {
+    //   headers: req.headers,
+    //   extractedApiKey: apiKey ? `${apiKey.substring(0, 10)}...` : null,
+    //   authMethod: req.headers['x-api-key'] ? 'x-api-key' : 
+    //              req.headers.authorization ? 'bearer' : 'none'
+    // });
 
     if (!apiKey) {
       return res.status(401).json({ 

@@ -11,7 +11,7 @@ const { handleLLMRequest } = require('./controllers/llmController');
 const authRoutes = require('./routes/auth'); // Add this line
 const { providerManager } = require('./services/providerManager');
 const { handleModelsList } = require('./controllers/modelController');
-const { getBalance } = require('./controllers/balanceController');
+
 const balanceRoutes = require('./routes/balanceRoutes');
 
 const app = express();
