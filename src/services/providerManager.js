@@ -141,7 +141,8 @@ class ProviderManager {
         socketId,
         userId: user._id.toString(),
         hasWebSocket: !!providerData.ws,
-        wsState: providerData.ws.readyState
+        wsState: providerData.ws.readyState,
+        models: providerData.models.join(', ')
       });
 
       return true;
