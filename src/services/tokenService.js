@@ -25,39 +25,69 @@ class TokenService {
     }
     static async initializeBalance(userId) {
         try {
-            // Check if balance already exists to avoid race conditions
+            // First try to find existing balance
             const existingBalance = await Balance.findOne({ userId });
+
             if (existingBalance) {
+                console.log(`Balance already exists for user ${userId}`);
                 return existingBalance;
             }
-    
-            // Create new balance with welcome amount
-            const newBalance = await Balance.create({
-                userId,
-                balance: tokenConfig.MULE.welcome_amount || 1.0, // Fallback to 1.0 if not configured
-                lastUpdated: new Date()
-            });
-    
-            // Create transaction record for initial balance using valid enum values
-            await Transaction.create({
-                timestamp: new Date(),
-                transactionType: 'deposit', // Use valid enum value instead of 'welcome_bonus'
-                consumerId: userId,
-                model: 'system_welcome_bonus',
-                modelType: 'llm',  // Use valid enum value instead of 'system'
-                modelTier: 'small', // Use valid enum value instead of 'system'
-                rawAmount: tokenConfig.MULE.welcome_amount || 1.0,
-                muleAmount: tokenConfig.MULE.welcome_amount || 1.0,
-                platformFee: 0,
-                metadata: {
-                    type: 'welcome_bonus',
-                    description: 'Initial welcome balance'
+
+            // Use findOneAndUpdate with upsert to handle race conditions
+            const balance = await Balance.findOneAndUpdate(
+                { userId },
+                {
+                    $setOnInsert: {
+                        balance: tokenConfig.MULE.welcome_amount || 1.0,
+                        lastUpdated: new Date()
+                    }
+                },
+                {
+                    upsert: true,
+                    new: true,
+                    runValidators: true
                 }
-            });
-    
-            return newBalance;
+            );
+
+            // Only create welcome transaction if balance was actually created
+            if (balance.balance === tokenConfig.MULE.welcome_amount) {
+                try {
+                    await Transaction.create({
+                        timestamp: new Date(),
+                        transactionType: 'deposit',
+                        consumerId: userId,
+                        model: 'system_welcome_bonus',
+                        modelType: 'llm',
+                        modelTier: 'small',
+                        rawAmount: tokenConfig.MULE.welcome_amount || 1.0,
+                        muleAmount: tokenConfig.MULE.welcome_amount || 1.0,
+                        platformFee: 0,
+                        metadata: {
+                            type: 'welcome_bonus',
+                            description: 'Initial welcome balance'
+                        }
+                    });
+                } catch (transactionError) {
+                    console.warn('Failed to create welcome transaction:', transactionError);
+                    // Continue since balance was created successfully
+                }
+            }
+
+            return balance;
+
         } catch (error) {
             console.error('Failed to initialize balance:', error);
+            if (error.code === 11000) {
+                // If we hit a duplicate key error, try to fetch the existing balance
+                try {
+                    const existingBalance = await Balance.findOne({ userId });
+                    if (existingBalance) {
+                        return existingBalance;
+                    }
+                } catch (fetchError) {
+                    console.error('Failed to fetch existing balance:', fetchError);
+                }
+            }
             throw new Error('Failed to initialize balance');
         }
     }
@@ -112,13 +142,22 @@ class TokenService {
         try {
             // Try to find existing balance
             let balance = await Balance.findOne({ userId });
-            
+
             // If no balance found, initialize it
             if (!balance) {
                 console.log(`Initializing balance for user ${userId}`);
-                balance = await this.initializeBalance(userId);
+                try {
+                    balance = await this.initializeBalance(userId);
+                } catch (initError) {
+                    // If initialization fails, try one more time to find the balance
+                    // in case it was created by a concurrent request
+                    balance = await Balance.findOne({ userId });
+                    if (!balance) {
+                        throw initError;
+                    }
+                }
             }
-            
+
             return {
                 balance: balance.balance || 0,
                 lastUpdated: balance.lastUpdated || new Date(),
@@ -126,10 +165,22 @@ class TokenService {
             };
         } catch (error) {
             console.error('Failed to get/initialize balance:', error);
+            if (error.code === 11000) {
+                // If we hit a duplicate key error, the balance was probably just created
+                // Try one more time to fetch it
+                const existingBalance = await Balance.findOne({ userId });
+                if (existingBalance) {
+                    return {
+                        balance: existingBalance.balance || 0,
+                        lastUpdated: existingBalance.lastUpdated || new Date(),
+                        userId: existingBalance.userId
+                    };
+                }
+            }
             throw new Error('Failed to retrieve balance');
         }
     }
-
+    
     static async processUsage({
         consumerId,
         providerId,
@@ -138,72 +189,72 @@ class TokenService {
         modelTier,
         usage,
         performance
-      }) {
+    }) {
         try {
-          const muleAmount = TokenCalculator.tokensToMules(usage.totalTokens, modelTier);
-          const platformFee = muleAmount * tokenConfig.fees.platform_fee;
-          const isSelfService = providerId && consumerId.toString() === providerId.toString();
-      
-          // Create single transaction record with all info
-          const transaction = await Transaction.create({
-            timestamp: new Date(),
-            transactionType: isSelfService ? 'self_service' : 'consumption',
-            consumerId,
-            providerId,
-            model,
-            modelType,
-            modelTier,
-            muleAmount: TokenCalculator.formatMules(muleAmount),
-            platformFee: TokenCalculator.formatMules(platformFee),
-            usage: {
-              promptTokens: usage.promptTokens,
-              completionTokens: usage.completionTokens,
-              totalTokens: usage.totalTokens,
-              duration_seconds: performance.duration_seconds,
-              tokens_per_second: performance.tokens_per_second
+            const muleAmount = TokenCalculator.tokensToMules(usage.totalTokens, modelTier);
+            const platformFee = muleAmount * tokenConfig.fees.platform_fee;
+            const isSelfService = providerId && consumerId.toString() === providerId.toString();
+
+            // Create single transaction record with all info
+            const transaction = await Transaction.create({
+                timestamp: new Date(),
+                transactionType: isSelfService ? 'self_service' : 'consumption',
+                consumerId,
+                providerId,
+                model,
+                modelType,
+                modelTier,
+                muleAmount: TokenCalculator.formatMules(muleAmount),
+                platformFee: TokenCalculator.formatMules(platformFee),
+                usage: {
+                    promptTokens: usage.promptTokens,
+                    completionTokens: usage.completionTokens,
+                    totalTokens: usage.totalTokens,
+                    duration_seconds: performance.duration_seconds,
+                    tokens_per_second: performance.tokens_per_second
+                }
+            });
+
+            // Update balances if not self-service
+            if (!isSelfService) {
+                await this._updateBalances(consumerId, providerId, muleAmount, platformFee);
             }
-          });
-      
-          // Update balances if not self-service
-          if (!isSelfService) {
-            await this._updateBalances(consumerId, providerId, muleAmount, platformFee);
-          }
-      
-          return transaction;
+
+            return transaction;
         } catch (error) {
-          console.error('Failed to process usage:', error);
-          throw error;
+            console.error('Failed to process usage:', error);
+            throw error;
         }
     }
 
     static async updateProviderMetrics(providerId, performance) {
         try {
-          // Update rolling average of tokens_per_second
-          await Provider.findOneAndUpdate(
-            { userId: providerId },
-            {
-              $push: {
-                'performance.history': {
-                  $each: [{
-                    timestamp: new Date(),
-                    tokens_per_second: performance.tokens_per_second,
-                    duration_seconds: performance.duration_seconds
-                  }],
-                  $slice: -100 // Keep last 100 entries
-                }
-              },
-              $inc: {
-                'performance.total_requests': 1,
-                'performance.total_tokens': performance.total_tokens
-              }
-            },
-            { upsert: true }
-          );
+            // Update rolling average of tokens_per_second
+            await Provider.findOneAndUpdate(
+                { userId: providerId },
+                {
+                    $push: {
+                        'performance.history': {
+                            $each: [{
+                                timestamp: new Date(),
+                                tokens_per_second: performance.tokens_per_second,
+                                duration_seconds: performance.duration_seconds
+                            }],
+                            $slice: -100 // Keep last 100 entries
+                        }
+                    },
+                    $inc: {
+                        'performance.total_requests': 1,
+                        'performance.total_tokens': performance.total_tokens
+                    }
+                },
+                { upsert: true }
+            );
         } catch (error) {
-          console.error('Failed to update provider metrics:', error);
+            console.error('Failed to update provider metrics:', error);
         }
-      }
-    
+    }
+
 
     static async getTransactionHistory({
         userId,

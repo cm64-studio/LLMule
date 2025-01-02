@@ -198,7 +198,7 @@ class ProviderManager {
     console.log('\n=== Finding Provider Debug ===');
     console.log('Looking for model:', requestedModel);
   
-    // Get all eligible providers
+    // Get all active providers
     const eligibleProviders = Array.from(this.providers.entries())
       .filter(([socketId, provider]) => {
         const isActive = provider.status === 'active';
@@ -207,12 +207,8 @@ class ProviderManager {
         const currentLoad = this.requestQueue.get(socketId) || 0;
         const isAvailable = currentLoad < this.loadBalancingThreshold;
   
-        // Check if provider has compatible model
-        const hasCompatibleModel = provider.models.some(model => {
-          const modelInfo = ModelManager.getModelInfo(model);
-          const requestedInfo = ModelManager.getModelInfo(requestedModel);
-          return modelInfo.tier === requestedInfo.tier;
-        });
+        // Check if provider has the exact model or compatible tier
+        const hasCompatibleModel = this._checkModelCompatibility(provider.models, requestedModel);
   
         console.log('Provider eligibility check:', {
           socketId,
@@ -222,7 +218,8 @@ class ProviderManager {
           hasWebSocket,
           currentLoad,
           isAvailable,
-          hasCompatibleModel
+          hasCompatibleModel,
+          requestedModel
         });
   
         return isActive && isReady && hasWebSocket && isAvailable && hasCompatibleModel;
@@ -233,36 +230,16 @@ class ProviderManager {
       return null;
     }
   
-    // Sort providers by load and pick the one with least load
-    const sortedProviders = eligibleProviders.sort(([idA], [idB]) => {
-      const loadA = this.requestQueue.get(idA) || 0;
-      const loadB = this.requestQueue.get(idB) || 0;
-      return loadA - loadB;
-    });
-  
-    // Get performance metrics for top 3 least loaded providers
-    const topProviders = await Promise.all(
-      sortedProviders.slice(0, 3).map(async ([socketId, provider]) => {
-        const performance = await this._getProviderPerformance(provider.userId);
-        return {
-          socketId,
-          provider,
-          load: this.requestQueue.get(socketId) || 0,
-          performance
-        };
-      })
+    // First, try to find providers with exact model match
+    const exactMatches = eligibleProviders.filter(([_, provider]) => 
+      provider.models.some(m => this._isExactModelMatch(m, requestedModel))
     );
   
-    // Score providers based on load and performance
-    const scoredProviders = topProviders.map(p => ({
-      ...p,
-      score: this._calculateProviderScore(p.load, p.performance.tokens_per_second)
-    }));
+    // Use exact matches if available, otherwise use tier-compatible providers
+    const matchingProviders = exactMatches.length > 0 ? exactMatches : eligibleProviders;
   
-    // Select the provider with the best score
-    const selected = scoredProviders.reduce((best, current) => 
-      current.score > best.score ? current : best
-    );
+    // Sort and select best provider based on load and performance
+    const selected = await this._selectOptimalProvider(matchingProviders);
   
     // Update request queue for selected provider
     const currentQueue = this.requestQueue.get(selected.socketId) || 0;
@@ -273,7 +250,8 @@ class ProviderManager {
       userId: selected.provider.userId,
       currentLoad: currentQueue + 1,
       score: selected.score,
-      performance: selected.performance
+      performance: selected.performance,
+      models: selected.provider.models
     });
   
     return {
@@ -281,6 +259,39 @@ class ProviderManager {
       provider: selected.provider,
       userId: selected.provider.userId
     };
+  }
+
+  _checkModelCompatibility(providerModels, requestedModel) {
+    // If it's a tier request (small, medium, large, xl)
+    if (['small', 'medium', 'large', 'xl'].includes(requestedModel)) {
+      return providerModels.some(model => {
+        const modelInfo = ModelManager.getModelInfo(model);
+        return modelInfo.tier === requestedModel;
+      });
+    }
+    
+    // For specific model requests, first try exact match
+    const hasExactMatch = providerModels.some(model => 
+      this._isExactModelMatch(model, requestedModel)
+    );
+    
+    if (hasExactMatch) return true;
+  
+    // If no exact match, don't fall back to tier matching for specific model requests
+    return false;
+  }
+
+  _isExactModelMatch(providerModel, requestedModel) {
+    // Normalize both model names for comparison
+    const normalizeModelName = (name) => {
+      // Remove version tags, paths, etc
+      return name.split(':')[0].split('/').pop().toLowerCase();
+    };
+  
+    const normalizedProvider = normalizeModelName(providerModel);
+    const normalizedRequested = normalizeModelName(requestedModel);
+  
+    return normalizedProvider === normalizedRequested;
   }
   
   _calculateProviderScore(load, tokensPerSecond) {
@@ -296,6 +307,29 @@ class ProviderManager {
     
     // Calculate final score (0-1 where 1 is best)
     return (1 - normalizedLoad) * loadWeight + normalizedPerformance * performanceWeight;
+  }
+
+  async _selectOptimalProvider(providers) {
+    // Get performance metrics for providers
+    const scoredProviders = await Promise.all(
+      providers.map(async ([socketId, provider]) => {
+        const performance = await this._getProviderPerformance(provider.userId);
+        const load = this.requestQueue.get(socketId) || 0;
+        const score = this._calculateProviderScore(load, performance.tokens_per_second);
+        
+        return {
+          socketId,
+          provider,
+          load,
+          performance,
+          score
+        };
+      })
+    );
+    // Select the provider with the best score
+    return scoredProviders.reduce((best, current) => 
+      current.score > best.score ? current : best
+    );
   }
 
   async _rankProviders(providers) {

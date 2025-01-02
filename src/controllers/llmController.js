@@ -155,23 +155,64 @@ async function selectModelAndProvider(requestedModel) {
 
 async function processLLMRequest(model, providerId, requestData, modelInfo) {
   try {
-      const response = await providerManager.routeRequest({
-          model,
-          messages: requestData.messages,
-          temperature: parseFloat(requestData.temperature) || 0.7,
-          max_tokens: parseInt(requestData.max_tokens) || modelInfo.context,
-          stream: false,
-          providerId  // Pass the provider ID through
-      });
+    const response = await providerManager.routeRequest({
+      model,
+      messages: requestData.messages,
+      temperature: parseFloat(requestData.temperature) || 0.7,
+      max_tokens: parseInt(requestData.max_tokens) || modelInfo.context,
+      stream: false,
+      providerId
+    });
 
-      if (!response || !response.choices) {
-          throw new Error("Invalid response from provider");
-      }
+    // Enhanced response validation
+    if (!response) {
+      throw new Error('No response received from provider');
+    }
 
-      return response;
+    if (response.error) {
+      throw new Error(response.error.message || 'Provider error');
+    }
+
+    if (!response.choices || !Array.isArray(response.choices) || response.choices.length === 0) {
+      throw new Error('Invalid response format: missing or empty choices array');
+    }
+
+    if (!response.choices[0].message || !response.choices[0].message.content) {
+      throw new Error('Invalid response format: missing message content');
+    }
+
+    // Validate usage data
+    if (!response.usage) {
+      response.usage = {
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        total_tokens: 0
+      };
+    }
+
+    return response;
+
   } catch (error) {
-      console.error('Error processing request:', error);
-      throw error;
+    console.error('Error processing request:', error);
+    
+    // Enhanced error handling
+    const errorResponse = {
+      error: {
+        message: error.message,
+        type: error.code || 'provider_error',
+        code: 'completion_failed'
+      }
+    };
+
+    // Log detailed error info
+    console.error('Request failed:', {
+      model,
+      providerId,
+      error: error.message,
+      stack: error.stack
+    });
+
+    throw errorResponse;
   }
 }
 
