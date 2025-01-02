@@ -4,7 +4,6 @@ const { Balance, Transaction } = require('../models/balanceModels');
 const { tokenConfig, TokenCalculator } = require('../config/tokenomics');
 const logger = require('../utils/logger');
 
-
 class TokenService {
     static async _handleProviderBalance(providerId, providerAmount) {
         // Skip balance update for UUID providers (they're anonymous/unregistered)
@@ -180,7 +179,7 @@ class TokenService {
             throw new Error('Failed to retrieve balance');
         }
     }
-    
+
     static async processUsage({
         consumerId,
         providerId,
@@ -191,12 +190,50 @@ class TokenService {
         performance
     }) {
         try {
-            const muleAmount = TokenCalculator.tokensToMules(usage.totalTokens, modelTier);
-            const platformFee = muleAmount * tokenConfig.fees.platform_fee;
+            // Log initial data
+            console.log('Processing usage input:', {
+                usage,
+                modelTier,
+                performance
+            });
+    
+            // Validate input
+            if (!usage || typeof usage.totalTokens !== 'number') {
+                throw new Error(`Invalid usage data: totalTokens must be a number, got ${typeof usage?.totalTokens}`);
+            }
+    
+            // Calculate MULE amounts with validation
+            let muleAmount = 0;
+            try {
+                muleAmount = parseFloat(TokenCalculator.tokensToMules(usage.totalTokens, modelTier)) || 0;
+                if (isNaN(muleAmount)) {
+                    console.error('Invalid muleAmount calculation:', {
+                        tokens: usage.totalTokens,
+                        tier: modelTier,
+                        result: muleAmount
+                    });
+                    muleAmount = 0;
+                }
+            } catch (error) {
+                console.error('Error calculating muleAmount:', error);
+                muleAmount = 0;
+            }
+    
+            // Calculate platform fee with validation
+            let platformFee = Math.max(0, parseFloat((muleAmount * tokenConfig.fees.platform_fee).toFixed(6)));
+            if (isNaN(platformFee)) {
+                console.error('Invalid platformFee calculation:', {
+                    muleAmount,
+                    fee: tokenConfig.fees.platform_fee,
+                    result: platformFee
+                });
+                platformFee = 0;
+            }
+    
             const isSelfService = providerId && consumerId.toString() === providerId.toString();
-
-            // Create single transaction record with all info
-            const transaction = await Transaction.create({
+    
+            // Prepare transaction data with validated numbers
+            const transactionData = {
                 timestamp: new Date(),
                 transactionType: isSelfService ? 'self_service' : 'consumption',
                 consumerId,
@@ -204,55 +241,85 @@ class TokenService {
                 model,
                 modelType,
                 modelTier,
-                muleAmount: TokenCalculator.formatMules(muleAmount),
-                platformFee: TokenCalculator.formatMules(platformFee),
+                rawAmount: parseInt(usage.totalTokens, 10),
+                muleAmount: parseFloat(muleAmount.toFixed(6)),
+                platformFee: parseFloat(platformFee.toFixed(6)),
+                // Explicitly create the usage object matching the schema structure
                 usage: {
-                    promptTokens: usage.promptTokens,
-                    completionTokens: usage.completionTokens,
-                    totalTokens: usage.totalTokens,
-                    duration_seconds: performance.duration_seconds,
-                    tokens_per_second: performance.tokens_per_second
+                    promptTokens: Math.max(0, parseInt(usage.promptTokens || 0, 10)),
+                    completionTokens: Math.max(0, parseInt(usage.completionTokens || 0, 10)),
+                    totalTokens: Math.max(0, parseInt(usage.totalTokens || 0, 10)),
+                    duration_seconds: Math.max(0, parseFloat(performance.duration_seconds || 0)),
+                    tokens_per_second: Math.max(0, parseFloat(performance.tokens_per_second || 0))
                 }
+            };
+    
+            console.log('Creating transaction with validated data:', {
+                ...transactionData,
+                consumerId: consumerId.toString(),
+                providerId: providerId?.toString()
             });
 
-            // Update balances if not self-service
-            if (!isSelfService) {
-                await this._updateBalances(consumerId, providerId, muleAmount, platformFee);
+            // Add this before creating the transaction
+            console.log('Validating transaction data structure:', {
+                hasUsage: !!transactionData.usage,
+                usageFields: transactionData.usage ? Object.keys(transactionData.usage) : [],
+                requiredFields: ['promptTokens', 'completionTokens', 'totalTokens', 'duration_seconds', 'tokens_per_second']
+            });
+
+            // Add this before creating the transaction
+            if (providerId) {
+                transactionData.providerId = new mongoose.Types.ObjectId(providerId);
             }
 
+    
+            // Create transaction record
+            const transaction = await Transaction.create(transactionData);
+
+            // Verify the saved data
+            console.log('Saved transaction data:', {
+                id: transaction._id,
+                hasUsage: !!transaction.usage,
+                usageData: transaction.usage
+            });
+    
+            // Update balances for non-self-service transactions
+            if (!isSelfService && muleAmount > 0) {
+                await this._updateBalances(consumerId, providerId, muleAmount, platformFee);
+                console.log('Balances updated:', {
+                    consumerId: consumerId.toString(),
+                    providerId: providerId.toString(),
+                    muleAmount,
+                    platformFee
+                });
+            } else {
+                console.log('Self-service transaction or zero amount - no balance update needed');
+            }
+    
             return transaction;
+    
         } catch (error) {
             console.error('Failed to process usage:', error);
+            if (error.name === 'ValidationError') {
+                console.error('Schema validation error:', {
+                    errors: error.errors,
+                    missingFields: Object.keys(error.errors),
+                    providedData: transactionData
+                });
+            }
             throw error;
         }
     }
 
     static async updateProviderMetrics(providerId, performance) {
-        try {
-            // Update rolling average of tokens_per_second
-            await Provider.findOneAndUpdate(
-                { userId: providerId },
-                {
-                    $push: {
-                        'performance.history': {
-                            $each: [{
-                                timestamp: new Date(),
-                                tokens_per_second: performance.tokens_per_second,
-                                duration_seconds: performance.duration_seconds
-                            }],
-                            $slice: -100 // Keep last 100 entries
-                        }
-                    },
-                    $inc: {
-                        'performance.total_requests': 1,
-                        'performance.total_tokens': performance.total_tokens
-                    }
-                },
-                { upsert: true }
-            );
-        } catch (error) {
-            console.error('Failed to update provider metrics:', error);
-        }
+        // Just log the performance metrics with the transaction
+        // No need to update user document since everything is in transactions
+        console.log('Provider performance logged:', {
+            providerId: providerId?.toString(),
+            tokens_per_second: performance.tokens_per_second,
+            duration_seconds: performance.duration_seconds,
+            total_tokens: performance.total_tokens
+        });
     }
 
 
@@ -306,39 +373,40 @@ class TokenService {
         }
     }
 
-    static async getProviderStats(userId, timeframe = '30d') {
+    static async getProviderStats(providerId, timeframe = '30d') {
         try {
-            const startDate = this._getStartDateFromTimeframe(timeframe);
+            const startDate = new Date();
+            startDate.setDate(startDate.getDate() - parseInt(timeframe));
 
             const stats = await Transaction.aggregate([
                 {
                     $match: {
-                        providerId: typeof userId === 'string' ? new mongoose.Types.ObjectId(userId) : userId,
-                        transactionType: 'consumption',
+                        providerId: new mongoose.Types.ObjectId(providerId),
                         timestamp: { $gte: startDate }
                     }
                 },
                 {
                     $group: {
-                        _id: {
-                            modelTier: '$modelTier',
-                            day: { $dateToString: { format: '%Y-%m-%d', date: '$timestamp' } }
-                        },
-                        totalMules: { $sum: '$muleAmount' },
-                        totalFees: { $sum: '$platformFee' },
-                        requestCount: { $sum: 1 }
+                        _id: null,
+                        totalRequests: { $sum: 1 },
+                        totalTokens: { $sum: '$rawAmount' },
+                        totalEarned: { $sum: '$muleAmount' },
+                        avgTokensPerSecond: {
+                            $avg: '$usage.tokens_per_second'
+                        }
                     }
-                },
-                {
-                    $sort: { '_id.day': 1 }
                 }
             ]);
 
-            return this._formatProviderStats(stats);
-
+            return stats[0] || {
+                totalRequests: 0,
+                totalTokens: 0,
+                totalEarned: 0,
+                avgTokensPerSecond: 0
+            };
         } catch (error) {
-            logger.error('Failed to get provider stats:', error);
-            throw error;
+            console.error('Failed to get provider stats:', error);
+            return null;
         }
     }
 
@@ -378,6 +446,63 @@ class TokenService {
     }
 
     // Helper methods
+
+    static async _updateBalances(consumerId, providerId, muleAmount, platformFee) {
+        try {
+            console.log('Updating balances:', {
+                consumerId: consumerId.toString(),
+                providerId: providerId?.toString(),
+                muleAmount,
+                platformFee
+            });
+
+            // 1. Decrease consumer balance
+            const consumerUpdate = await Balance.findOneAndUpdate(
+                { userId: consumerId },
+                {
+                    $inc: { balance: -muleAmount },
+                    $set: { lastUpdated: new Date() }
+                },
+                { new: true }
+            );
+
+            if (!consumerUpdate) {
+                throw new Error('Consumer balance not found');
+            }
+
+            console.log('Consumer balance updated:', {
+                userId: consumerId.toString(),
+                newBalance: consumerUpdate.balance
+            });
+
+            // 2. Increase provider balance (if not self-service)
+            if (providerId && consumerId.toString() !== providerId.toString()) {
+                const providerAmount = muleAmount - platformFee;
+
+                const providerUpdate = await Balance.findOneAndUpdate(
+                    { userId: providerId },
+                    {
+                        $inc: { balance: providerAmount },
+                        $set: { lastUpdated: new Date() }
+                    },
+                    { new: true, upsert: true }
+                );
+
+                console.log('Provider balance updated:', {
+                    userId: providerId.toString(),
+                    newBalance: providerUpdate.balance,
+                    amountAdded: providerAmount
+                });
+            } else {
+                console.log('Self-service transaction - no provider balance update needed');
+            }
+
+        } catch (error) {
+            console.error('Balance update failed:', error);
+            throw error;
+        }
+    }
+
     static _getStartDateFromTimeframe(timeframe) {
         const now = new Date();
         switch (timeframe) {

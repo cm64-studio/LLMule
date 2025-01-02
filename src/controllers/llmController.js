@@ -5,7 +5,6 @@ const { providerManager } = require('../services/providerManager');
 const TokenService = require('../services/tokenService');
 const { TokenCalculator } = require('../config/tokenomics');
 const RequestTimer = require('../utils/requestTimer');
-const UsageLog = require('../models/usageLogModel');
 const mongoose = require('mongoose');
 
 // OpenAI API compatible error responses
@@ -230,77 +229,85 @@ function calculateUsage(response, modelInfo) {
   return usage;
 }
 
-async function logUsage({ consumerId, providerId, model, modelInfo, usage, timing }) {
+async function logUsage({ 
+  consumerId, 
+  providerId, 
+  model, 
+  modelInfo, 
+  usage, 
+  timing 
+}) {
   console.log('Logging usage:', { 
-      consumerId: consumerId.toString(),
-      providerId: providerId,
-      model,
-      usage,
-      timing,
-      modelInfo 
+    consumerId: consumerId.toString(),
+    providerId: providerId,
+    model,
+    usage,
+    timing,
+    modelInfo 
   });
   
-  // Ensure both IDs are MongoDB ObjectIds
   try {
-      // Convert string IDs to ObjectIds if needed
-      const consumerObjectId = typeof consumerId === 'string' ? 
-          new mongoose.Types.ObjectId(consumerId) : consumerId;
-          
-      const providerObjectId = typeof providerId === 'string' ? 
-          new mongoose.Types.ObjectId(providerId) : providerId;
+    // Ensure both IDs are MongoDB ObjectIds
+    const consumerObjectId = typeof consumerId === 'string' ? 
+      new mongoose.Types.ObjectId(consumerId) : consumerId;
+      
+    const providerObjectId = typeof providerId === 'string' ? 
+      new mongoose.Types.ObjectId(providerId) : providerId;
 
-      if (!providerObjectId) {
-          console.error('Provider validation failed:', {
-              providerId,
-              type: typeof providerId
-          });
-          throw new Error('Invalid provider ID - registration required');
+    if (!providerObjectId) {
+      console.error('Provider validation failed:', {
+        providerId,
+        type: typeof providerId
+      });
+      throw new Error('Invalid provider ID - registration required');
+    }
+
+    const validatedUsage = {
+      prompt_tokens: Math.max(0, usage.prompt_tokens || 0),
+      completion_tokens: Math.max(0, usage.completion_tokens || 0),
+      total_tokens: Math.max(0, usage.total_tokens || 0)
+    };
+
+    // Process usage through TokenService
+    const result = await TokenService.processUsage({
+      consumerId: consumerObjectId,
+      providerId: providerObjectId,
+      model: typeof model === 'object' ? model.name : model,
+      modelType: 'llm',
+      modelTier: modelInfo.tier,
+      usage: {
+        promptTokens: validatedUsage.prompt_tokens,
+        completionTokens: validatedUsage.completion_tokens,
+        totalTokens: validatedUsage.total_tokens
+      },
+      performance: {
+        duration_seconds: timing.duration_seconds,
+        tokens_per_second: timing.tokens_per_second
       }
+    });
 
-      const validatedUsage = {
-          prompt_tokens: Math.max(0, usage.prompt_tokens || 0),
-          completion_tokens: Math.max(0, usage.completion_tokens || 0),
-          total_tokens: Math.max(0, usage.total_tokens || 0)
-      };
+    // Log successful transaction
+    console.log('Usage logged successfully:', {
+      consumerId: consumerObjectId.toString(),
+      providerId: providerObjectId.toString(),
+      transactionId: result._id.toString(),
+      muleAmount: result.muleAmount
+    });
 
-      const muleAmount = TokenCalculator.tokensToMules(validatedUsage.total_tokens, modelInfo.tier);
-
-      // Check if this is a self-service request
-      const isSelfService = consumerObjectId.toString() === providerObjectId.toString();
-
-      // Create usage log with validated ObjectIds
-      await UsageLog.create({
-          consumerId: consumerObjectId,
-          providerId: providerObjectId,
-          model: typeof model === 'object' ? model.name : model,
-          modelTier: modelInfo.tier,
-          tokensUsed: validatedUsage.total_tokens,
-          promptTokens: validatedUsage.prompt_tokens,
-          completionTokens: validatedUsage.completion_tokens,
-          duration_seconds: timing.duration_seconds,
-          tokens_per_second: timing.tokens_per_second,
-          isSelfService,
-          muleAmount,
-          timestamp: new Date()
-      });
-
-      console.log('Usage log created successfully:', {
-          consumerId: consumerObjectId.toString(),
-          providerId: providerObjectId.toString(),
-          isSelfService
-      });
-
-      return { muleAmount, isSelfService };
+    return {
+      muleAmount: result.muleAmount,
+      isSelfService: result.transactionType === 'self_service'
+    };
 
   } catch (error) {
-      console.error('Error logging usage:', error);
-      if (error.message === 'Invalid provider ID - registration required') {
-          throw error;
-      }
-      if (error.name === 'BSONTypeError' || error.name === 'CastError') {
-          throw new Error('Invalid ID format provided');
-      }
+    console.error('Error logging usage:', error);
+    if (error.message === 'Invalid provider ID - registration required') {
       throw error;
+    }
+    if (error.name === 'BSONTypeError' || error.name === 'CastError') {
+      throw new Error('Invalid ID format provided');
+    }
+    throw error;
   }
 }
 

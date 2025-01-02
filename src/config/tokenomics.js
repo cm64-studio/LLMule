@@ -47,11 +47,29 @@ const tokenConfig = {
   // Helper functions for token calculations
   class TokenCalculator {
     static mulesToTokens(mules, tier) {
-      return mules * tokenConfig.conversion_rates[tier];
+      if (typeof mules !== 'number' || isNaN(mules) || mules < 0) {
+          console.error('Invalid mules value:', mules);
+          return 0;
+      }
+      const rate = tokenConfig.conversion_rates[tier];
+      if (!rate) {
+          console.error('Invalid tier:', tier);
+          return 0;
+      }
+      return Math.floor(mules * rate); // Ensure integer result
     }
     
     static tokensToMules(tokens, tier) {
-      return tokens / tokenConfig.conversion_rates[tier];
+      if (typeof tokens !== 'number' || isNaN(tokens) || tokens < 0) {
+          console.error('Invalid tokens value:', tokens);
+          return 0;
+      }
+      const rate = tokenConfig.conversion_rates[tier];
+      if (!rate) {
+          console.error('Invalid tier:', tier);
+          return 0;
+      }
+      return parseFloat((tokens / rate).toFixed(6)); // 6 decimal precision
     }
     
     static calculateProviderEarnings(tokens, tier) {
@@ -60,7 +78,11 @@ const tokenConfig = {
     }
     
     static formatMules(amount) {
-      return Number(amount.toFixed(tokenConfig.MULE.decimals));
+      if (typeof amount !== 'number' || isNaN(amount)) {
+          console.error('Invalid amount to format:', amount);
+          return 0;
+      }
+      return parseFloat(amount.toFixed(tokenConfig.MULE.decimals));
     }
   }
   
