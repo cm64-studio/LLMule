@@ -38,14 +38,14 @@ class TokenService {
                 lastUpdated: new Date()
             });
     
-            // Create transaction record for initial balance
+            // Create transaction record for initial balance using valid enum values
             await Transaction.create({
                 timestamp: new Date(),
-                transactionType: 'welcome_bonus',
+                transactionType: 'deposit', // Use valid enum value instead of 'welcome_bonus'
                 consumerId: userId,
-                model: 'system',
-                modelType: 'system',
-                modelTier: 'system',
+                model: 'system_welcome_bonus',
+                modelType: 'llm',  // Use valid enum value instead of 'system'
+                modelTier: 'small', // Use valid enum value instead of 'system'
                 rawAmount: tokenConfig.MULE.welcome_amount || 1.0,
                 muleAmount: tokenConfig.MULE.welcome_amount || 1.0,
                 platformFee: 0,
