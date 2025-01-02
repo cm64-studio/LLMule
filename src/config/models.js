@@ -17,8 +17,9 @@ const modelConfig = {
       /small/i,          // Small variants
       /phi-?2/i,         // Phi-2 specific
       /phi-?v2/i,        // Phi variants
-      /phi3:?mini/i,     // Phi3 mini variant
+      /phi3?:?mini/i,    // Phi3 mini variant - Fixed pattern
       /:?mini/i,         // Other mini variants
+      /phi-?1/i,         // Phi-1
     ],
     medium: [
       /7\.?[0-9]?b/i,    // 7B variants (Mistral, Llama2 etc)
@@ -26,6 +27,7 @@ const modelConfig = {
       /openhermes/i,     // OpenHermes (usually 7B)
       /8\.?[0-9]?b/i,    // 8B variants
       /13\.?[0-9]?b/i,   // 13B variants
+      /phi-?3(?!:?mini)/i, // Phi-3 but not phi3:mini
     ],
     large: [
       /phi-?4/i,         // Phi-4 model
@@ -45,7 +47,10 @@ const modelConfig = {
     'phi': {
       '1': 'small',
       '2': 'small',
-      '3': 'medium',
+      '3': {
+        'mini': 'small',  // Added specific entry for phi3:mini
+        'default': 'medium'
+      },
       '4': 'large'
     },
     'mistral': 'medium',
@@ -133,7 +138,14 @@ const modelConfig = {
         ram: '32GB',
         gpu: '32GB VRAM'
       }
-    }
+    },
+    
+  },
+
+  knownModels: {
+    'phi3:mini': 'small',
+    'phi-3:mini': 'small',
+    'phi3-mini': 'small'
   },
 
   // Model name aliases and normalizations
@@ -175,7 +187,32 @@ class ModelManager {
       return this.createModelInfo(normalizedName);
     }
 
-    // Pattern matching for size/tier
+    // Check known models first
+    if (modelConfig.knownModels[normalizedName]) {
+      return this.createModelInfo(modelConfig.knownModels[normalizedName]);
+    }
+
+    // Check model families
+    const [family, variant] = normalizedName.split(/[-:\/]/);
+    if (modelConfig.modelFamilies[family]) {
+      if (typeof modelConfig.modelFamilies[family] === 'string') {
+        return this.createModelInfo(modelConfig.modelFamilies[family]);
+      }
+      
+      // Handle nested family structures (like phi3:mini)
+      if (typeof modelConfig.modelFamilies[family] === 'object') {
+        if (variant && modelConfig.modelFamilies[family][variant]) {
+          if (typeof modelConfig.modelFamilies[family][variant] === 'object') {
+            // Handle sub-variants like phi3:mini
+            const subVariant = normalizedName.includes('mini') ? 'mini' : 'default';
+            return this.createModelInfo(modelConfig.modelFamilies[family][variant][subVariant]);
+          }
+          return this.createModelInfo(modelConfig.modelFamilies[family][variant]);
+        }
+      }
+    }
+
+    // Pattern matching for size/tier as fallback
     for (const [tier, patterns] of Object.entries(modelConfig.sizePatterns)) {
       for (const pattern of patterns) {
         if (pattern.test(normalizedName)) {
@@ -184,7 +221,7 @@ class ModelManager {
       }
     }
 
-    // Default to medium if no match found
+    // If no match found, warn and default to medium
     console.warn(`Model size not determined for: ${modelName}, defaulting to medium`);
     return this.createModelInfo('medium');
   }
