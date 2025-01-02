@@ -153,23 +153,23 @@ class ModelManager {
 
     // Handle non-string or empty inputs
     if (!modelName) return '';
-    
+
     // Convert to string and lowercase
     const name = modelName.toString().toLowerCase();
-    
+
     // Handle various model name formats
     const cleanName = name
       .split(':')[0]         // Remove version tags
       .split('@')[0]         // Remove version numbers
       .split('/').pop() ||   // Get last part of path
       name;                  // Fallback to original
-      
+
     return cleanName;
   }
-  
+
   static getModelInfo(modelName) {
     const normalizedName = this._normalizeModelName(modelName);
-    
+
     // Direct tier request
     if (['small', 'medium', 'large', 'xl'].includes(normalizedName)) {
       return this.createModelInfo(normalizedName);
@@ -187,6 +187,47 @@ class ModelManager {
     // Default to medium if no match found
     console.warn(`Model size not determined for: ${modelName}, defaulting to medium`);
     return this.createModelInfo('medium');
+  }
+
+  // Add this method to the ModelManager class in src/config/models.js
+
+  static validateModel(modelName) {
+    if (!modelName) return false;
+
+    // Normalize model name
+    const normalizedName = this._normalizeModelName(modelName);
+
+    // Direct tier requests are valid
+    if (['small', 'medium', 'large', 'xl'].includes(normalizedName)) {
+      return true;
+    }
+
+    // Check if model exists in known models
+    if (modelConfig.models[normalizedName]) {
+      return true;
+    }
+
+    // Check against size patterns
+    for (const [tier, patterns] of Object.entries(modelConfig.sizePatterns)) {
+      for (const pattern of patterns) {
+        if (pattern.test(normalizedName)) {
+          return true;
+        }
+      }
+    }
+
+    // Check against model families
+    const [family, variant] = normalizedName.split(/[-/]/);
+    if (modelConfig.modelFamilies[family]) {
+      if (typeof modelConfig.modelFamilies[family] === 'string') {
+        return true;
+      }
+      if (variant && modelConfig.modelFamilies[family][variant]) {
+        return true;
+      }
+    }
+
+    return false;
   }
 
   // Changed to static method and renamed without underscore
