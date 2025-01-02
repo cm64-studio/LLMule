@@ -25,13 +25,40 @@ class TokenService {
     }
     static async initializeBalance(userId) {
         try {
-            return await Balance.create({
+            // Check if balance already exists to avoid race conditions
+            const existingBalance = await Balance.findOne({ userId });
+            if (existingBalance) {
+                return existingBalance;
+            }
+    
+            // Create new balance with welcome amount
+            const newBalance = await Balance.create({
                 userId,
-                balance: tokenConfig.MULE.welcome_amount
+                balance: tokenConfig.MULE.welcome_amount || 1.0, // Fallback to 1.0 if not configured
+                lastUpdated: new Date()
             });
+    
+            // Create transaction record for initial balance
+            await Transaction.create({
+                timestamp: new Date(),
+                transactionType: 'welcome_bonus',
+                consumerId: userId,
+                model: 'system',
+                modelType: 'system',
+                modelTier: 'system',
+                rawAmount: tokenConfig.MULE.welcome_amount || 1.0,
+                muleAmount: tokenConfig.MULE.welcome_amount || 1.0,
+                platformFee: 0,
+                metadata: {
+                    type: 'welcome_bonus',
+                    description: 'Initial welcome balance'
+                }
+            });
+    
+            return newBalance;
         } catch (error) {
-            logger.error('Failed to initialize balance:', error);
-            throw error;
+            console.error('Failed to initialize balance:', error);
+            throw new Error('Failed to initialize balance');
         }
     }
 
@@ -83,14 +110,23 @@ class TokenService {
 
     static async getBalance(userId) {
         try {
-            const balance = await Balance.findOne({ userId });
+            // Try to find existing balance
+            let balance = await Balance.findOne({ userId });
+            
+            // If no balance found, initialize it
             if (!balance) {
-                throw new Error('Balance not found');
+                console.log(`Initializing balance for user ${userId}`);
+                balance = await this.initializeBalance(userId);
             }
-            return balance;
+            
+            return {
+                balance: balance.balance || 0,
+                lastUpdated: balance.lastUpdated || new Date(),
+                userId: balance.userId
+            };
         } catch (error) {
-            logger.error('Failed to get balance:', error);
-            throw error;
+            console.error('Failed to get/initialize balance:', error);
+            throw new Error('Failed to retrieve balance');
         }
     }
 

@@ -5,28 +5,41 @@ const { TokenCalculator, tokenConfig } = require('../config/tokenomics');
 class BalanceController {
   static async getBalance(req, res) {
     try {
-      const balance = await TokenService.getBalance(req.user._id);
+        // Ensure we have a user ID
+        if (!req.user?._id) {
+            return res.status(401).json({
+                error: 'Unauthorized',
+                message: 'User ID not found'
+            });
+        }
 
-      // Calculate available tokens per tier
-      const availableTokens = {};
-      Object.entries(tokenConfig.conversion_rates).forEach(([tier, rate]) => {
-        availableTokens[tier] = TokenCalculator.mulesToTokens(balance.balance, tier);
-      });
+        // Get or initialize balance
+        const balance = await TokenService.getBalance(req.user._id);
 
-      res.json({
-        mule_balance: balance.balance,
-        available_tokens: availableTokens,
-        last_updated: balance.lastUpdated
-      });
+        // Calculate available tokens per tier
+        const availableTokens = {};
+        Object.entries(tokenConfig.conversion_rates).forEach(([tier, rate]) => {
+            availableTokens[tier] = TokenCalculator.mulesToTokens(balance.balance, tier);
+        });
+
+        // Return formatted response
+        res.json({
+            mule_balance: balance.balance,
+            available_tokens: availableTokens,
+            last_updated: balance.lastUpdated
+        });
 
     } catch (error) {
-      console.error('Balance fetch error:', error);
-      res.status(500).json({
-        error: 'Failed to fetch balance',
-        message: error.message
-      });
+        console.error('Balance fetch error:', error);
+        
+        // Send appropriate error response
+        res.status(500).json({
+            error: 'Failed to fetch balance',
+            message: error.message,
+            code: 'BALANCE_ERROR'
+        });
     }
-  }
+  } 
 
   static async getTransactionHistory(req, res) {
     try {
