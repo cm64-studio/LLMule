@@ -88,7 +88,7 @@ const handleLLMRequest = async (req, res) => {
 };
 
 async function selectModelAndProvider(requestedModel) {
-  const providers = providerManager.getProvidersInfo();
+  const providers = await providerManager.getProvidersInfo();
   
   if (['small', 'medium', 'large', 'xl'].includes(requestedModel)) {
     const availableModels = providers
@@ -100,8 +100,8 @@ async function selectModelAndProvider(requestedModel) {
         });
         
         return {
-          socketId: provider.id,  // This is the WebSocket ID
-          userId: provider.userId, // This is the MongoDB ObjectId
+          socketId: provider.id,
+          userId: provider.userId,
           models: matchingModels
         };
       })
@@ -118,27 +118,38 @@ async function selectModelAndProvider(requestedModel) {
     return {
       selectedModel: selected.models[0],
       socketId: selected.socketId,
-      userId: selected.userId // MongoDB ObjectId
+      userId: selected.userId
     };
   }
 
-  if (!ModelManager.validateModel(requestedModel)) {
+  // Handle specific model request
+  const modelInfo = ModelManager.getModelInfo(requestedModel);
+  if (!modelInfo) {
     const error = new Error("Invalid model");
     error.code = "INVALID_MODEL";
     throw error;
   }
 
-  const provider = providerManager.findAvailableProvider(requestedModel);
-  if (!provider) {
+  const eligibleProviders = providers.filter(p => {
+    return p.status === 'active' && p.models.some(m => {
+      const info = ModelManager.getModelInfo(m);
+      return info.tier === modelInfo.tier;
+    });
+  });
+
+  if (eligibleProviders.length === 0) {
     const error = new Error("No provider available");
     error.code = "NO_MODELS_AVAILABLE";
     error.model = requestedModel;
     throw error;
   }
 
+  const selected = eligibleProviders[Math.floor(Math.random() * eligibleProviders.length)];
+  
   return {
     selectedModel: requestedModel,
-    selectedProvider: provider.userId
+    socketId: selected.id,
+    userId: selected.userId
   };
 }
 

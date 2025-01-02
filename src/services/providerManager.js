@@ -512,12 +512,11 @@ class ProviderManager {
   getProvidersInfo() {
     return Array.from(this.providers.entries()).map(([id, provider]) => ({
       id,
-      userId: provider.userId ? provider.userId.toString() : 'anonymous',
-      models: provider.models || [],
+      userId: provider.userId?.toString(),  // Ensure userId is string
+      models: Array.isArray(provider.models) ? provider.models : [],
       status: provider.status || 'unknown',
       lastHeartbeat: provider.lastHeartbeat ? new Date(provider.lastHeartbeat).toISOString() : null,
-      hasWebSocket: !!provider.ws,
-      currentLoad: this.requestCounts.get(id) || 0
+      hasWebSocket: !!provider.ws && provider.ws.readyState === WebSocket.OPEN
     }));
   }
 
