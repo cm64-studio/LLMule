@@ -204,10 +204,14 @@ class ProviderManager {
   // In providerManager.js
 
   async findAvailableProvider(requestedModel) {
-    console.log('\n=== Finding Provider Debug ===');
-    console.log('Looking for model:', requestedModel);
-
-    // Get all active providers
+    let targetModel = requestedModel;
+    let filterInfo = null;
+   
+    if (requestedModel.includes('|')) {
+      const [tier, modelType] = requestedModel.split('|');
+      filterInfo = { tier, modelType };
+    }
+   
     const eligibleProviders = Array.from(this.providers.entries())
       .filter(([socketId, provider]) => {
         const isActive = provider.status === 'active';
@@ -215,92 +219,62 @@ class ProviderManager {
         const hasWebSocket = provider.ws && provider.ws.readyState === WebSocket.OPEN;
         const currentLoad = this.requestQueue.get(socketId) || 0;
         const isAvailable = currentLoad < this.loadBalancingThreshold;
-
-        // Check if provider has the exact model or compatible tier
-        const hasCompatibleModel = this._checkModelCompatibility(provider.models, requestedModel);
-
-        console.log('Provider eligibility check:', {
-          socketId,
-          models: provider.models,
-          isActive,
-          isReady,
-          hasWebSocket,
-          currentLoad,
-          isAvailable,
-          hasCompatibleModel,
-          requestedModel
-        });
-
-        return isActive && isReady && hasWebSocket && isAvailable && hasCompatibleModel;
+   
+        if (!isActive || !isReady || !hasWebSocket || !isAvailable) return false;
+   
+        if (filterInfo) {
+          return provider.models.some(model => {
+            const info = ModelManager.getModelInfo(model);
+            return info.tier === filterInfo.tier && 
+                   model.toLowerCase().includes(filterInfo.modelType);
+          });
+        }
+   
+        return this._checkModelCompatibility(provider.models, requestedModel);
       });
-
-    if (eligibleProviders.length === 0) {
-      console.log('No eligible providers found');
-      return null;
+   
+    if (eligibleProviders.length === 0) return null;
+   
+    const selected = await this._selectOptimalProvider(eligibleProviders);
+    
+    if (filterInfo) {
+      targetModel = selected.provider.models.find(model => {
+        const info = ModelManager.getModelInfo(model);
+        return info.tier === filterInfo.tier && 
+               model.toLowerCase().includes(filterInfo.modelType);
+      });
     }
-
-    // First, try to find providers with exact model match
-    const exactMatches = eligibleProviders.filter(([_, provider]) =>
-      provider.models.some(m => this._isExactModelMatch(m, requestedModel))
-    );
-
-    // Use exact matches if available, otherwise use tier-compatible providers
-    const matchingProviders = exactMatches.length > 0 ? exactMatches : eligibleProviders;
-
-    // Sort and select best provider based on load and performance
-    const selected = await this._selectOptimalProvider(matchingProviders);
-
-    // Update request queue for selected provider
-    const currentQueue = this.requestQueue.get(selected.socketId) || 0;
-    this.requestQueue.set(selected.socketId, currentQueue + 1);
-
-    console.log('Selected provider:', {
-      socketId: selected.socketId,
-      userId: selected.provider.userId,
-      currentLoad: currentQueue + 1,
-      score: selected.score,
-      performance: selected.performance,
-      models: selected.provider.models
-    });
-
+   
     return {
       socketId: selected.socketId,
       provider: selected.provider,
-      userId: selected.provider.userId
+      userId: selected.provider.userId,
+      model: targetModel 
     };
-  }
+   }
 
   _checkModelCompatibility(providerModels, requestedModel) {
-    console.log('Checking compatibility:', {
-      providerModels,
-      requestedModel
-    });
+    if (!requestedModel) return false;
   
-    // If it's a tier request (small, medium, large, xl)
-    if (['small', 'medium', 'large', 'xl'].includes(requestedModel)) {
-      const hasCompatibleModel = providerModels.some(model => {
-        const modelInfo = ModelManager.getModelInfo(model);
-        const isCompatible = modelInfo.tier === requestedModel;
-        console.log('Tier compatibility check:', {
-          model,
-          tier: modelInfo.tier,
-          requestedTier: requestedModel,
-          isCompatible
-        });
-        return isCompatible;
+    // Handle combined type|model requests 
+    if (requestedModel.includes('|')) {
+      const [tier, modelType] = requestedModel.toLowerCase().split('|');
+      
+      return providerModels.some(model => {
+        const info = ModelManager.getModelInfo(model);
+        return info.tier === tier && model.toLowerCase().includes(modelType);
       });
-      return hasCompatibleModel;
     }
-    
-    // For specific model requests, first try exact match
-    const hasExactMatch = providerModels.some(model => 
-      this._isExactModelMatch(model, requestedModel)
-    );
-    
-    if (hasExactMatch) return true;
   
-    // If no exact match, don't fall back to tier matching for specific model requests
-    return false;
+    // Rest of existing compatibility logic
+    if (['small', 'medium', 'large', 'xl'].includes(requestedModel)) {
+      return providerModels.some(model => {
+        const info = ModelManager.getModelInfo(model);
+        return info.tier === requestedModel;
+      });
+    }
+  
+    return providerModels.some(model => this._isExactModelMatch(model, requestedModel));
   }
 
   _isExactModelMatch(providerModel, requestedModel) {
@@ -407,90 +381,55 @@ class ProviderManager {
 
 
   async routeRequest(requestData) {
-    console.log('\n=== Routing Request ===');
-    console.log('Request data:', {
-      model: requestData.model,
-      messagesCount: requestData.messages?.length,
-      temperature: requestData.temperature,
-      maxTokens: requestData.max_tokens
-    });
-
-    // Add await here
     const providerInfo = await this.findAvailableProvider(requestData.model);
-
-    console.log('Provider Info:', {
-      found: !!providerInfo,
-      socketId: providerInfo?.socketId,
-      hasWs: !!(providerInfo?.provider?.ws),
-      wsState: providerInfo?.provider?.ws?.readyState
-    });
-
-    if (!providerInfo) {
-      throw new Error('No available providers');
-    }
-
+   
+    if (!providerInfo) throw new Error('No available providers');
+   
     const provider = this.providers.get(providerInfo.socketId);
-    if (!provider || !provider.ws) {
-      console.error('Provider state check:', {
-        hasProvider: !!provider,
-        hasWs: !!(provider?.ws),
-        wsState: provider?.ws?.readyState
-      });
-      throw new Error('Provider WebSocket not available');
-    }
-
+    if (!provider?.ws) throw new Error('Provider WebSocket not available');
+   
     const requestId = uuidv4();
+    
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pendingRequests.delete(requestId);
-        const currentCount = this.requestCounts.get(providerInfo.socketId) || 1;
-        this.requestCounts.set(providerInfo.socketId, currentCount - 1);
-        reject(new Error('Request timeout after 5 minutes'));
+        this.requestCounts.set(providerInfo.socketId, 
+          (this.requestCounts.get(providerInfo.socketId) || 1) - 1);
+        reject(new Error('Request timeout after 5 minutes')); 
       }, 300000);
-
+   
       this.pendingRequests.set(requestId, {
         resolve,
-        reject,
+        reject, 
         timeout,
         socketId: providerInfo.socketId,
         providerId: providerInfo.userId
       });
-
+   
       try {
         const message = {
           type: 'completion_request',
           requestId,
-          model: requestData.model,
+          model: providerInfo.model, // Use actual model from provider
           messages: requestData.messages,
           temperature: requestData.temperature,
           max_tokens: requestData.max_tokens
         };
-
-        console.log('Sending WebSocket message:', {
-          type: message.type,
-          requestId,
-          model: message.model,
-          socketId: providerInfo.socketId
-        });
-
+   
         provider.ws.send(JSON.stringify(message), (error) => {
           if (error) {
-            console.error('WebSocket send error:', error);
             clearTimeout(timeout);
             this.pendingRequests.delete(requestId);
             reject(new Error('Failed to send request to provider'));
-          } else {
-            console.log('WebSocket message sent successfully');
           }
         });
       } catch (error) {
-        console.error('Error sending request:', error);
         clearTimeout(timeout);
         this.pendingRequests.delete(requestId);
-        reject(error);
+        reject(error); 
       }
     });
-  }
+   }
 
   _matchModelTier(providerModel, requestedModel) {
     // Get model info from ModelManager

@@ -1,6 +1,7 @@
 // services/tokenService.js
 const mongoose = require('mongoose');
-const { Balance, Transaction } = require('../models/balanceModels');
+const { Balance } = require('../models/balanceModels');
+const Transaction = require('../models/transactionModel');
 const { tokenConfig, TokenCalculator } = require('../config/tokenomics');
 const logger = require('../utils/logger');
 

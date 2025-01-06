@@ -6,11 +6,14 @@ const mongoose = require('mongoose');
 const { v4: uuidv4 } = require('uuid');
 const cors = require('cors');
 const config = require('./config');
-const { authenticateApiKey } = require('./middleware/auth');
+const { authenticateApiKey, authenticateAdmin } = require('./middleware/auth');
 const { handleLLMRequest } = require('./controllers/llmController');
-const authRoutes = require('./routes/auth'); // Add this line
+const authRoutes = require('./routes/auth');
 const { providerManager } = require('./services/providerManager');
 const { handleModelsList } = require('./controllers/modelController');
+const DebugController = require('./controllers/debugController');
+const logger = require('./utils/logger');
+const requestLoggerMiddleware = require('./middleware/requestLogger');
 
 const balanceRoutes = require('./routes/balanceRoutes');
 
@@ -19,11 +22,12 @@ const server = createServer(app);
 const wss = new WebSocket.Server({ server, path: config.websocket_path });
 
 global.providerManager = providerManager;
+
 // MongoDB Connection
 mongoose.connect(config.mongodb_uri)
-  .then(() => console.log('Connected to MongoDB'))
+  .then(() => logger.info('Connected to MongoDB'))
   .catch(err => {
-    console.error('MongoDB connection error:', err);
+    logger.error('MongoDB connection error:', { error: err.message, stack: err.stack });
     process.exit(1);
   });
 
@@ -33,26 +37,38 @@ app.use(cors());
 // Middleware
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-
+app.use(requestLoggerMiddleware);
 
 // Make providerManager available to routes
 app.locals.providerManager = providerManager;
 
 // Add auth routes
-app.use('/auth', authRoutes); // Add this line
-
-
+app.use('/auth', authRoutes);
 
 // API Routes
 app.post('/v1/chat/completions', authenticateApiKey, handleLLMRequest);
-
 app.get('/v1/models', authenticateApiKey, handleModelsList);
-
 app.use('/v1', balanceRoutes);
 
-// Add this route in your server.js, replacing the existing debug endpoint:
+// Debug routes
+app.get('/debug/users', authenticateAdmin, async (req, res) => {
+  try {
+    const stats = await DebugController.getUserStats();
+    res.json(stats);
+  } catch (error) {
+    logger.error('Failed to get user stats', { 
+      error: error.message, 
+      stack: error.stack,
+      requestId: req.requestId 
+    });
+    res.status(500).json({
+      error: 'Failed to get user stats',
+      message: error.message
+    });
+  }
+});
 
-app.get('/debug/providers', (req, res) => {
+app.get('/debug/providers', authenticateAdmin, (req, res) => {
   try {
     const providersInfo = app.locals.providerManager.getProvidersInfo();
     res.json({
@@ -61,7 +77,11 @@ app.get('/debug/providers', (req, res) => {
       timestamp: new Date().toISOString()
     });
   } catch (error) {
-    console.error('Debug endpoint error:', error);
+    logger.error('Failed to get providers info', { 
+      error: error.message, 
+      stack: error.stack,
+      requestId: req.requestId 
+    });
     res.status(500).json({
       error: 'Failed to get providers info',
       message: error.message,
@@ -70,7 +90,7 @@ app.get('/debug/providers', (req, res) => {
   }
 });
 
-app.get('/debug/load-balancing', (req, res) => {
+app.get('/debug/load-balancing', authenticateAdmin, (req, res) => {
   const stats = app.locals.providerManager.getLoadBalancingStats();
   res.json({
     stats,
@@ -78,7 +98,7 @@ app.get('/debug/load-balancing', (req, res) => {
   });
 });
 
-app.get('/debug/status', (req, res) => {
+app.get('/debug/status', authenticateAdmin, (req, res) => {
   const manager = app.locals.providerManager;
   res.json({
     providers: {
@@ -102,10 +122,103 @@ app.get('/health', (req, res) => {
   });
 });
 
+// WebSocket message handler
+async function handleProviderMessage(ws, providerId, data) {
+  logger.debug('Processing provider message', {
+    providerId,
+    messageType: data.type
+  });
+  
+  try {
+    switch (data.type) {
+      case 'register':
+        if (!data.models || data.models.length === 0 || !data.apiKey) {
+          logger.warn('Invalid provider registration data', {
+            providerId,
+            hasModels: !!data.models,
+            modelCount: data.models?.length,
+            hasApiKey: !!data.apiKey
+          });
+          
+          ws.send(JSON.stringify({
+            type: 'error',
+            error: 'Invalid registration data. Required: models and apiKey'
+          }));
+          return;
+        }
+
+        const registrationData = {
+          models: data.models,
+          ws,
+          apiKey: data.apiKey
+        };
+
+        if (data.userId) {
+          logger.info('Including userId in registration', {
+            providerId,
+            userId: data.userId
+          });
+          registrationData.userId = data.userId;
+        }
+
+        const success = await providerManager.registerProvider(providerId, registrationData);
+
+        if (!success) {
+          logger.error('Provider registration failed', { providerId });
+          ws.send(JSON.stringify({
+            type: 'error',
+            error: 'Registration failed. Invalid API key or inactive user'
+          }));
+          ws.close();
+          return;
+        }
+
+        logger.info('Provider registered successfully', { providerId });
+        ws.send(JSON.stringify({
+          type: 'registered',
+          message: 'Successfully registered as provider'
+        }));
+        break;
+        
+      case 'pong':
+        providerManager.updateProviderStatus(providerId, 'active');
+        break;
+        
+      case 'completion_response':
+        logger.debug('Handling completion response', { 
+          providerId,
+          requestId: data.requestId 
+        });
+        providerManager.handleCompletionResponse(data.requestId, data.response);
+        break;
+
+      default:
+        logger.warn('Unknown message type received', {
+          providerId,
+          type: data.type
+        });
+        ws.send(JSON.stringify({
+          type: 'error',
+          error: 'Unknown message type'
+        }));
+    }
+  } catch (error) {
+    logger.error('Error in handleProviderMessage', {
+      providerId,
+      error: error.message,
+      stack: error.stack
+    });
+    ws.send(JSON.stringify({
+      type: 'error',
+      error: 'Internal server error'
+    }));
+  }
+}
+
 // WebSocket connection handling
 wss.on('connection', (ws) => {
   const providerId = uuidv4();
-  console.log(`New provider connected: ${providerId}`);
+  logger.info('New provider connected', { providerId });
   
   // Setup early connection tracking
   ws.isAlive = true;
@@ -121,20 +234,34 @@ wss.on('connection', (ws) => {
   });
   
   ws.on('message', async (message) => {
-    console.log(`\n=== WebSocket Message from ${providerId} ===`);
+    logger.debug('WebSocket Message received', { 
+      providerId,
+      messageType: 'incoming'
+    });
+
     try {
       let data = JSON.parse(message);
-      console.log('Message type:', data.type);
+      logger.info('Processing WebSocket message', {
+        providerId,
+        type: data.type
+      });
       
-      // Add ws reference to registration data
       if (data.type === 'register') {
-        console.log('Processing registration with ws instance');
+        logger.debug('Processing registration', {
+          providerId,
+          hasModels: !!data.models,
+          modelCount: data.models?.length
+        });
         data.ws = ws;
       }
       
       await handleProviderMessage(ws, providerId, data);
     } catch (error) {
-      console.error('Error handling message:', error);
+      logger.error('WebSocket message handling error', {
+        providerId,
+        error: error.message,
+        stack: error.stack
+      });
       ws.send(JSON.stringify({
         type: 'error',
         error: 'Failed to process message'
@@ -143,134 +270,46 @@ wss.on('connection', (ws) => {
   });
 
   ws.on('close', () => {
-    console.log(`Provider disconnected: ${providerId}`);
+    logger.info('Provider disconnected', { providerId });
     providerManager.removeProvider(providerId);
   });
 
   ws.on('pong', () => {
-    console.log(`Received pong from ${providerId}`);
+    logger.debug('Received pong', { providerId });
     ws.isAlive = true;
     ws.lastPong = Date.now();
     providerManager.updateProviderStatus(providerId, 'active');
   });
 
-  // Setup ping handler
   ws.on('ping', () => {
     try {
       ws.pong();
     } catch (error) {
-      console.error(`Error sending pong to ${providerId}:`, error);
+      logger.error('Error sending pong', {
+        providerId,
+        error: error.message,
+        stack: error.stack
+      });
     }
   });
 });
 
-async function handleProviderMessage(ws, providerId, data) {
-  console.log(`Received message from provider ${providerId}:`, data.type);
-  
-  try {
-    switch (data.type) {
-      case 'register':
-        if (!data.models || data.models.length === 0 || !data.apiKey) {
-          console.error('Invalid provider registration data:', {
-            hasModels: !!data.models,
-            modelCount: data.models?.length,
-            hasApiKey: !!data.apiKey
-          });
-          ws.send(JSON.stringify({
-            type: 'error',
-            error: 'Invalid registration data. Required: models and apiKey'
-          }));
-          return;
-        }
-
-        // Include userId in registration if available
-        const registrationData = {
-          models: data.models,
-          ws,
-          apiKey: data.apiKey
-        };
-
-        if (data.userId) {
-          console.log('Including userId in registration:', data.userId);
-          registrationData.userId = data.userId;
-        }
-
-        const success = await providerManager.registerProvider(providerId, registrationData);
-
-        if (!success) {
-          console.error('Provider registration failed');
-          ws.send(JSON.stringify({
-            type: 'error',
-            error: 'Registration failed. Invalid API key or inactive user'
-          }));
-          ws.close();
-          return;
-        }
-
-        console.log('Provider registered successfully:', providerId);
-        ws.send(JSON.stringify({
-          type: 'registered',
-          message: 'Successfully registered as provider'
-        }));
-        break;
-        
-      case 'pong':
-        providerManager.updateProviderStatus(providerId, 'active');
-        break;
-        
-      case 'completion_response':
-        providerManager.handleCompletionResponse(data.requestId, data.response);
-        break;
-
-      default:
-        console.warn(`Unknown message type: ${data.type}`);
-        ws.send(JSON.stringify({
-          type: 'error',
-          error: 'Unknown message type'
-        }));
-    }
-  } catch (error) {
-    console.error('Error in handleProviderMessage:', error);
-    ws.send(JSON.stringify({
-      type: 'error',
-      error: 'Internal server error'
-    }));
-  }
-}
-
 // Start server
 const PORT = config.port || 3000;
-const HOST = '0.0.0.0'; // Esto hace que escuche en todas las interfaces
+const HOST = '0.0.0.0';
 
 server.listen(PORT, HOST, () => {
-  console.log(`\n=== LLMule Server Started ===`);
-  console.log(`🚀 Server running on:`);
-  console.log(`   - Local:    http://localhost:${PORT}`);
-  console.log(`   - Network:  http://${getLocalIP()}:${PORT}`);
-  console.log(`\n🔌 WebSocket server path: ${config.websocket_path}`);
-  console.log(`📦 MongoDB connected`);
+  logger.info('Server started', {
+    port: PORT,
+    host: HOST,
+    websocketPath: config.websocket_path,
+    environment: process.env.NODE_ENV
+  });
 });
-
-// Función helper para obtener IP local
-function getLocalIP() {
-  const { networkInterfaces } = require('os');
-  const nets = networkInterfaces();
-  
-  for (const name of Object.keys(nets)) {
-    for (const net of nets[name]) {
-      // Skip over non-IPv4 and internal (i.e. 127.0.0.1) addresses
-      if (net.family === 'IPv4' && !net.internal) {
-        return net.address;
-      }
-    }
-  }
-  return 'localhost';
-}
-
 
 // Graceful shutdown
 process.on('SIGTERM', () => {
-  console.log('Received SIGTERM. Performing graceful shutdown...');
+  logger.info('Received SIGTERM. Performing graceful shutdown...');
   mongoose.connection.close();
   server.close();
   process.exit(0);

@@ -10,35 +10,27 @@ const modelConfig = {
   // Model size patterns for classification
   sizePatterns: {
     small: [
-      /1\.?[0-9]?b/i,    // 1B, 1.3B etc
-      /2\.?[0-9]?b/i,    // 2B variants
-      /3\.?[0-9]?b/i,    // 3B variants
-      /tiny/i,           // TinyLlama etc
-      /small/i,          // Small variants
-      /phi-?2/i,         // Phi-2 specific
-      /phi-?v2/i,        // Phi variants
-      /phi3?:?mini/i,    // Phi3 mini variant - Fixed pattern
-      /:?mini/i,         // Other mini variants
-      /phi-?1/i,         // Phi-1
+      /\b[1-3]\.?[0-9]?b\b/i,  // 1-3B models
+      /tiny|mini|small/i,       // Small variants
+      /\b\d{1,3}m\b/i,         // Models in millions (135m etc)
+      /phi-?[12]/i,            // Phi-1, Phi-2
     ],
     medium: [
-      /7\.?[0-9]?b/i,    // 7B variants (Mistral, Llama2 etc)
-      /mistral/i,        // Mistral variants
-      /openhermes/i,     // OpenHermes (usually 7B)
-      /8\.?[0-9]?b/i,    // 8B variants
-      /13\.?[0-9]?b/i,   // 13B variants
-      /phi-?3(?!:?mini)/i, // Phi-3 but not phi3:mini
+      /\b[4-9]\.?[0-9]?b\b/i,  // 4-9B models
+      /\b1[0-2]\.?[0-9]?b\b/i, // 10-12B models
+      /mistral-?7b/i,
+      /llama-?[23]-?7b/i,
     ],
     large: [
-      /phi-?4/i,         // Phi-4 model
-      /mixtral/i,        // Mixtral models
-      /14\.?[0-9]?b/i,   // 14B variants
-      /20\.?[0-9]?b/i,   // 20B variants
-      /30\.?[0-9]?b/i,   // 30B variants
+      /\b1[3-9]\.?[0-9]?b\b/i, // 13-19B models
+      /\b2[0-9]\.?[0-9]?b\b/i, // 20-29B models
+      /mixtral/i,
+      /phi-?4/i,
+      /qwen.*14b/i,
     ],
     xl: [
-      /65\.?[0-9]?b/i,   // 65B variants
-      /70\.?[0-9]?b/i,   // 70B variants
+      /\b[3-9][0-9]\.?[0-9]?b\b/i, // 30B+ models
+      /llama-?2-?70b/i,
     ]
   },
 
@@ -48,7 +40,7 @@ const modelConfig = {
       '1': 'small',
       '2': 'small',
       '3': {
-        'mini': 'small',  // Added specific entry for phi3:mini
+        'mini': 'small',
         'default': 'medium'
       },
       '4': 'large'
@@ -61,6 +53,8 @@ const modelConfig = {
       '70b': 'xl'
     },
     'openchat': 'medium',
+    'openhermes': 'medium', // Add explicit entry
+    'hermes': 'medium',     // For variants
     'vicuna': {
       '7b': 'medium',
       '13b': 'medium'
@@ -153,6 +147,16 @@ const modelConfig = {
     'mistral': 'mistral-7b',
     'mixtral': 'mixtral-8x7b',
     'tiny': 'tinyllama'
+  },
+
+  modelTypes: {
+    mistral: /mistral|mistal/i,
+    llama: /llama|alpaca/i,
+    phi: /phi/i,
+    qwen: /qwen/i,
+    mixtral: /mixtral/i,
+    hermes: /hermes/i,
+    openchat: /openchat/i,
   }
 };
 
@@ -181,6 +185,12 @@ class ModelManager {
 
   static getModelInfo(modelName) {
     if (!modelName) return this.createModelInfo('medium');
+
+    // Handle combined type|model requests
+    if (modelName.includes('|')) {
+      const [tierOrType, model] = modelName.split('|');
+      return this._handleCombinedRequest(tierOrType, model);
+    }
     
     console.log('Getting model info for:', modelName);
   
@@ -223,6 +233,22 @@ class ModelManager {
     // Default to medium if no match found
     console.warn(`Model size not determined for: ${modelName}, defaulting to medium`);
     return this.createModelInfo('medium');
+  }
+
+  static _handleCombinedRequest(tierOrType, model) {
+    // Check if first part is a tier
+    if (['small', 'medium', 'large', 'xl'].includes(tierOrType.toLowerCase())) {
+      const modelInfo = this.getModelInfo(model);
+      return modelInfo.tier === tierOrType.toLowerCase() ? modelInfo : null;
+    }
+
+    // Check if it's a model type filter
+    const typePattern = modelConfig.modelTypes[tierOrType.toLowerCase()];
+    if (typePattern && typePattern.test(model)) {
+      return this.getModelInfo(model);
+    }
+
+    return null;
   }
 
   // Add this method to the ModelManager class in src/config/models.js

@@ -8,10 +8,14 @@ const handleModelsList = async (req, res) => {
 
     // Get unique models from all active providers with tier info
     const uniqueModels = new Map(); // Use Map to track unique models with their info
+    const modelCounts = new Map(); // Track counts of each model
 
     providersInfo.forEach(provider => {
       if (provider.status === 'active') {
         provider.models.forEach(model => {
+          // Update count for this model
+          modelCounts.set(model, (modelCounts.get(model) || 0) + 1);
+          
           if (!uniqueModels.has(model)) {
             const modelInfo = ModelManager.getModelInfo(model);
             uniqueModels.set(model, {
@@ -23,8 +27,14 @@ const handleModelsList = async (req, res) => {
               parent: null,
               tier: modelInfo.tier, // Add tier info
               context_length: modelInfo.context || 4096,
-              permission: []
+              permission: [],
+              provider_count: modelCounts.get(model) // Add count of providers using this model
             });
+          } else {
+            // Update the count for existing model
+            const modelData = uniqueModels.get(model);
+            modelData.provider_count = modelCounts.get(model);
+            uniqueModels.set(model, modelData);
           }
         });
       }
@@ -36,7 +46,8 @@ const handleModelsList = async (req, res) => {
     // Return in the expected format with added tier info
     res.json({
       object: "list",
-      data: models
+      data: models,
+      record_count: models.length
     });
 
   } catch (error) {

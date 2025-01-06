@@ -47,4 +47,43 @@ const authenticateApiKey = async (req, res, next) => {
 }
 };
 
-module.exports = { authenticateApiKey };
+const authenticateAdmin = async (req, res, next) => {
+  try {
+    const apiKey = req.headers['x-api-key'] || 
+                  (req.headers.authorization?.startsWith('Bearer ') ? 
+                   req.headers.authorization.substring(7) : null);
+
+    if (!apiKey) {
+      return res.status(401).json({ 
+        error: 'Authentication failed',
+        message: 'Admin API key is required'
+      });
+    }
+
+    const user = await User.findOne({ 
+      apiKey,
+      emailVerified: true, 
+      status: 'active',
+      isAdmin: true
+    });
+
+    if (!user) {
+      return res.status(403).json({ 
+        error: 'Authorization failed',
+        message: 'Admin access required'
+      });
+    }
+
+    req.user = user;
+    next();
+
+  } catch (error) {
+    console.error('Admin auth error:', error);
+    res.status(500).json({ 
+      error: 'Authentication error',
+      message: 'An error occurred during authentication'
+    });
+  }
+};
+
+module.exports = { authenticateApiKey, authenticateAdmin };

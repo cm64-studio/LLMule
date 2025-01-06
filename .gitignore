@@ -50,3 +50,6 @@ coverage
 
 # Exported files
 exported-files.txt
+
+# logs
+logs/
