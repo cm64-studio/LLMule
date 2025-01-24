@@ -4,6 +4,7 @@ const { Balance } = require('../models/balanceModels');
 const Transaction = require('../models/transactionModel');
 const { tokenConfig, TokenCalculator } = require('../config/tokenomics');
 const logger = require('../utils/logger');
+const { Provider } = require('../models/providerModel');
 
 class TokenService {
     static async _handleProviderBalance(providerId, providerAmount) {
@@ -191,138 +192,135 @@ class TokenService {
         performance
     }) {
         try {
-            // Log initial data
-            console.log('Processing usage input:', {
-                usage,
-                modelTier,
-                performance
-            });
-    
-            // Validate input
-            if (!usage || typeof usage.totalTokens !== 'number') {
-                throw new Error(`Invalid usage data: totalTokens must be a number, got ${typeof usage?.totalTokens}`);
+            // Validate consumer ID
+            if (!mongoose.Types.ObjectId.isValid(consumerId)) {
+                throw new Error('Invalid consumer ID');
             }
-    
-            // Calculate MULE amounts with validation
-            let muleAmount = 0;
-            try {
-                muleAmount = parseFloat(TokenCalculator.tokensToMules(usage.totalTokens, modelTier)) || 0;
-                if (isNaN(muleAmount)) {
-                    console.error('Invalid muleAmount calculation:', {
-                        tokens: usage.totalTokens,
-                        tier: modelTier,
-                        result: muleAmount
-                    });
-                    muleAmount = 0;
-                }
-            } catch (error) {
-                console.error('Error calculating muleAmount:', error);
-                muleAmount = 0;
-            }
-    
-            // Calculate platform fee with validation
-            let platformFee = Math.max(0, parseFloat((muleAmount * tokenConfig.fees.platform_fee).toFixed(6)));
-            if (isNaN(platformFee)) {
-                console.error('Invalid platformFee calculation:', {
-                    muleAmount,
-                    fee: tokenConfig.fees.platform_fee,
-                    result: platformFee
-                });
-                platformFee = 0;
-            }
-    
-            const isSelfService = providerId && consumerId.toString() === providerId.toString();
-    
-            // Prepare transaction data with validated numbers
+
+            // Determine transaction type
+            const isSelfService = consumerId.toString() === providerId?.toString();
+            const transactionType = isSelfService ? 'self_service' : 'consumption';
+
+            // Calculate MULE amount
+            const muleAmount = TokenCalculator.tokensToMules(usage.totalTokens, modelTier);
+            const platformFee = TokenCalculator.calculatePlatformFee(muleAmount);
+
+            // Prepare transaction data
             const transactionData = {
                 timestamp: new Date(),
-                transactionType: isSelfService ? 'self_service' : 'consumption',
-                consumerId,
-                providerId,
+                transactionType,
+                consumerId: new mongoose.Types.ObjectId(consumerId),
                 model,
                 modelType,
                 modelTier,
-                rawAmount: parseInt(usage.totalTokens, 10),
-                muleAmount: parseFloat(muleAmount.toFixed(6)),
-                platformFee: parseFloat(platformFee.toFixed(6)),
-                // Explicitly create the usage object matching the schema structure
+                rawAmount: usage.totalTokens,
+                muleAmount,
+                platformFee,
                 usage: {
-                    promptTokens: Math.max(0, parseInt(usage.promptTokens || 0, 10)),
-                    completionTokens: Math.max(0, parseInt(usage.completionTokens || 0, 10)),
-                    totalTokens: Math.max(0, parseInt(usage.totalTokens || 0, 10)),
-                    duration_seconds: Math.max(0, parseFloat(performance.duration_seconds || 0)),
-                    tokens_per_second: Math.max(0, parseFloat(performance.tokens_per_second || 0))
+                    promptTokens: usage.promptTokens,
+                    completionTokens: usage.completionTokens,
+                    totalTokens: usage.totalTokens,
+                    duration_seconds: performance.duration_seconds,
+                    tokens_per_second: performance.tokens_per_second
+                },
+                metadata: {
+                    request_success: usage.totalTokens > 0,
+                    performance_metrics: {
+                        tokens_per_second: performance.tokens_per_second,
+                        duration_seconds: performance.duration_seconds,
+                        timestamp: new Date()
+                    }
                 }
             };
-    
-            console.log('Creating transaction with validated data:', {
-                ...transactionData,
-                consumerId: consumerId.toString(),
-                providerId: providerId?.toString()
-            });
 
-            // Add this before creating the transaction
-            console.log('Validating transaction data structure:', {
-                hasUsage: !!transactionData.usage,
-                usageFields: transactionData.usage ? Object.keys(transactionData.usage) : [],
-                requiredFields: ['promptTokens', 'completionTokens', 'totalTokens', 'duration_seconds', 'tokens_per_second']
-            });
-
-            // Add this before creating the transaction
-            if (providerId) {
+            // Add provider ID if not self-service
+            if (providerId && !isSelfService) {
+                if (!mongoose.Types.ObjectId.isValid(providerId)) {
+                    throw new Error('Invalid provider ID');
+                }
                 transactionData.providerId = new mongoose.Types.ObjectId(providerId);
             }
 
-    
             // Create transaction record
             const transaction = await Transaction.create(transactionData);
 
-            // Verify the saved data
-            console.log('Saved transaction data:', {
-                id: transaction._id,
-                hasUsage: !!transaction.usage,
-                usageData: transaction.usage
-            });
-    
+            // Update provider's performance metrics if not self-service
+            if (!isSelfService && providerId) {
+                await this.updateProviderMetrics(providerId, {
+                    tokens_per_second: performance.tokens_per_second,
+                    duration_seconds: performance.duration_seconds,
+                    total_tokens: usage.totalTokens,
+                    success: usage.totalTokens > 0
+                });
+            }
+
             // Update balances for non-self-service transactions
             if (!isSelfService && muleAmount > 0) {
                 await this._updateBalances(consumerId, providerId, muleAmount, platformFee);
-                console.log('Balances updated:', {
-                    consumerId: consumerId.toString(),
-                    providerId: providerId.toString(),
-                    muleAmount,
-                    platformFee
-                });
-            } else {
-                console.log('Self-service transaction or zero amount - no balance update needed');
             }
-    
-            return transaction;
-    
+
+            return {
+                transactionId: transaction._id,
+                muleAmount,
+                transactionType,
+                performance: {
+                    tokens_per_second: performance.tokens_per_second,
+                    duration_seconds: performance.duration_seconds
+                }
+            };
+
         } catch (error) {
             console.error('Failed to process usage:', error);
-            if (error.name === 'ValidationError') {
-                console.error('Schema validation error:', {
-                    errors: error.errors,
-                    missingFields: Object.keys(error.errors),
-                    providedData: transactionData
-                });
-            }
             throw error;
         }
     }
 
     static async updateProviderMetrics(providerId, performance) {
-        // Just log the performance metrics with the transaction
-        // No need to update user document since everything is in transactions
-        console.log('Provider performance logged:', {
-            providerId: providerId?.toString(),
-            tokens_per_second: performance.tokens_per_second,
-            duration_seconds: performance.duration_seconds,
-            total_tokens: performance.total_tokens
-        });
-    }
+        if (!providerId) return;
 
+        try {
+            const provider = await Provider.findOneAndUpdate(
+                { userId: providerId },
+                {
+                    $push: {
+                        'performance.history': {
+                            timestamp: new Date(),
+                            tokens_per_second: performance.tokens_per_second,
+                            duration_seconds: performance.duration_seconds,
+                            success: performance.success
+                        }
+                    },
+                    $inc: {
+                        'performance.total_requests': 1,
+                        'performance.total_tokens': performance.total_tokens,
+                        'performance.successful_requests': performance.success ? 1 : 0,
+                        'performance.failed_requests': performance.success ? 0 : 1
+                    },
+                    $set: {
+                        lastSeen: new Date()
+                    }
+                },
+                {
+                    new: true,
+                    upsert: true,
+                    setDefaultsOnInsert: true
+                }
+            );
+
+            // Keep only last 1000 performance records
+            if (provider.performance.history.length > 1000) {
+                await Provider.updateOne(
+                    { userId: providerId },
+                    { $pop: { 'performance.history': -1 } }
+                );
+            }
+
+            return provider;
+        } catch (error) {
+            console.error('Error updating provider metrics:', error);
+            throw error;
+        }
+    }
 
     static async getTransactionHistory({
         userId,
@@ -374,12 +372,25 @@ class TokenService {
         }
     }
 
-    static async getProviderStats(providerId, timeframe = '30d') {
+    static async getProviderStats(providerId, timeframe = '24h') {
         try {
             const startDate = new Date();
-            startDate.setDate(startDate.getDate() - parseInt(timeframe));
+            switch(timeframe) {
+                case '24h':
+                    startDate.setHours(startDate.getHours() - 24);
+                    break;
+                case '7d':
+                    startDate.setDate(startDate.getDate() - 7);
+                    break;
+                case '30d':
+                    startDate.setDate(startDate.getDate() - 30);
+                    break;
+                default:
+                    startDate.setHours(startDate.getHours() - 24);
+            }
 
-            const stats = await Transaction.aggregate([
+            // Get transaction stats
+            const transactionStats = await Transaction.aggregate([
                 {
                     $match: {
                         providerId: new mongoose.Types.ObjectId(providerId),
@@ -390,24 +401,101 @@ class TokenService {
                     $group: {
                         _id: null,
                         totalRequests: { $sum: 1 },
-                        totalTokens: { $sum: '$rawAmount' },
+                        totalTokens: { $sum: '$usage.totalTokens' },
                         totalEarned: { $sum: '$muleAmount' },
-                        avgTokensPerSecond: {
-                            $avg: '$usage.tokens_per_second'
+                        avgTokensPerSecond: { $avg: '$usage.tokens_per_second' },
+                        maxTokensPerSecond: { $max: '$usage.tokens_per_second' },
+                        avgDurationSeconds: { $avg: '$usage.duration_seconds' },
+                        failedRequests: {
+                            $sum: {
+                                $cond: [
+                                    { $lt: ['$usage.totalTokens', 1] },
+                                    1,
+                                    0
+                                ]
+                            }
+                        }
+                    }
+                },
+                {
+                    $project: {
+                        _id: 0,
+                        totalRequests: 1,
+                        totalTokens: 1,
+                        totalEarned: 1,
+                        avgTokensPerSecond: { $round: ['$avgTokensPerSecond', 2] },
+                        maxTokensPerSecond: { $round: ['$maxTokensPerSecond', 2] },
+                        avgDurationSeconds: { $round: ['$avgDurationSeconds', 2] },
+                        failedRequests: 1,
+                        successRate: {
+                            $multiply: [
+                                {
+                                    $divide: [
+                                        { $subtract: ['$totalRequests', '$failedRequests'] },
+                                        { $max: ['$totalRequests', 1] }
+                                    ]
+                                },
+                                100
+                            ]
                         }
                     }
                 }
             ]);
 
-            return stats[0] || {
+            // Get latest performance metrics from Provider model
+            const provider = await Provider.findOne(
+                { userId: providerId },
+                { 'performance.history': { $slice: -10 } }
+            );
+
+            let recentPerformance = {
+                avgTokensPerSecond: 0,
+                maxTokensPerSecond: 0
+            };
+
+            if (provider?.performance?.history?.length > 0) {
+                const recentHistory = provider.performance.history;
+                recentPerformance = {
+                    avgTokensPerSecond: Math.round(
+                        recentHistory.reduce((acc, curr) => acc + (curr.tokens_per_second || 0), 0) / 
+                        recentHistory.length
+                    ),
+                    maxTokensPerSecond: Math.round(
+                        Math.max(...recentHistory.map(h => h.tokens_per_second || 0))
+                    )
+                };
+            }
+
+            const stats = transactionStats[0] || {
                 totalRequests: 0,
                 totalTokens: 0,
                 totalEarned: 0,
-                avgTokensPerSecond: 0
+                avgTokensPerSecond: 0,
+                maxTokensPerSecond: 0,
+                avgDurationSeconds: 0,
+                failedRequests: 0,
+                successRate: 100
             };
+
+            // Use the most recent metrics for performance
+            return {
+                ...stats,
+                avgTokensPerSecond: Math.max(stats.avgTokensPerSecond, recentPerformance.avgTokensPerSecond),
+                maxTokensPerSecond: Math.max(stats.maxTokensPerSecond, recentPerformance.maxTokensPerSecond)
+            };
+
         } catch (error) {
             console.error('Failed to get provider stats:', error);
-            return null;
+            return {
+                totalRequests: 0,
+                totalTokens: 0,
+                totalEarned: 0,
+                avgTokensPerSecond: 0,
+                maxTokensPerSecond: 0,
+                avgDurationSeconds: 0,
+                failedRequests: 0,
+                successRate: 100
+            };
         }
     }
 

@@ -6,6 +6,7 @@ const User = require('../src/models/userModel');
 const Transaction = require('../src/models/transactionModel');
 const { tokenConfig, TokenCalculator } = require('../src/config/tokenomics');
 const chalk = require('chalk'); // Add for better CLI output
+const { Balance } = require('../src/models/balanceModels');
 require('dotenv').config();
 
 program
@@ -110,6 +111,70 @@ program
       });
 
       console.log(chalk.green(`Added ${amount} MULE to ${options.email}`));
+      process.exit(0);
+    } catch (error) {
+      console.error(chalk.red('Error:'), error);
+      process.exit(1);
+    }
+  });
+
+program
+  .command('set-balance')
+  .description('Set exact MULE token balance for a user')
+  .requiredOption('-e, --email <email>', 'User email')
+  .requiredOption('-a, --amount <amount>', 'Exact amount of MULE tokens to set')
+  .action(async (options) => {
+    try {
+      await mongoose.connect(process.env.MONGODB_URI);
+      
+      const user = await User.findOne({ email: options.email });
+      if (!user) {
+        console.error(chalk.red('User not found'));
+        process.exit(1);
+      }
+
+      const newBalance = parseFloat(options.amount);
+      if (isNaN(newBalance) || newBalance < 0) {
+        console.error(chalk.red('Invalid amount - must be zero or positive'));
+        process.exit(1);
+      }
+
+      // Update the balance in Balance model
+      await Balance.findOneAndUpdate(
+        { userId: user._id },
+        { 
+          balance: newBalance,
+          lastUpdated: new Date()
+        },
+        { upsert: true }
+      );
+
+      // Create deposit transaction
+      await Transaction.create({
+        timestamp: new Date(),
+        transactionType: 'deposit',
+        consumerId: user._id,
+        model: 'system',
+        modelType: 'llm',
+        modelTier: 'small',
+        rawAmount: newBalance,
+        muleAmount: newBalance,
+        platformFee: 0,
+        usage: {
+          promptTokens: 0,
+          completionTokens: 0,
+          totalTokens: 0,
+          duration_seconds: 0,
+          tokens_per_second: 0
+        },
+        metadata: {
+          source: 'admin_cli',
+          note: 'Manual balance set',
+          type: 'set_balance'
+        }
+      });
+
+      console.log(chalk.green(`Set balance to ${newBalance} MULE for ${options.email}`));
       process.exit(0);
     } catch (error) {
       console.error(chalk.red('Error:'), error);

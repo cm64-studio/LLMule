@@ -25,7 +25,7 @@ class EmailService {
 
         <p>🔐 Keep this key safe! It's your passport to the LLMule network.</p>
 
-        <h2>🚀 Quick Start</h2>
+        <h2>💻 Developer Quick Start</h2>
         <pre style="background: #f5f5f5; padding: 15px; border-radius: 5px;">
 curl -X POST https://api.llmule.com/v1/chat/completions \\
 -H "Content-Type: application/json" \\
@@ -42,7 +42,7 @@ curl -X POST https://api.llmule.com/v1/chat/completions \\
         
         <p style="font-size: 0.8em; color: #666;">
         P.S. Join our community on Discord for support and updates! 
-        <a href="https://discord.gg/llmule">discord.gg/llmule</a>
+        <a href="https://discord.gg/TKmrBfuj2m">Join Discord</a>
         </p>
       </div>
     `;
@@ -58,7 +58,7 @@ Your API Key: ${apiKey}
 
 🔐 Keep this key safe! It's your passport to the LLMule network.
 
-🚀 Quick Start:
+💻 Developer Quick Start:
 curl -X POST https://api.llmule.com/v1/chat/completions \\
 -H "Content-Type: application/json" \\
 -H "Authorization: Bearer ${apiKey}" \\
@@ -72,7 +72,7 @@ curl -X POST https://api.llmule.com/v1/chat/completions \\
 Happy hacking!
 The LLMule Team 🚀
 
-P.S. Join our community on Discord for support and updates! discord.gg/llmule
+P.S. Join our community on Discord for support and updates! discord.gg/TKmrBfuj2m
     `;
 
     return this.client.sendEmail({

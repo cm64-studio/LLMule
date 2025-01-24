@@ -1,53 +1,98 @@
 // src/controllers/modelController.js
 const { ModelManager } = require('../config/models');
+const TokenService = require('../services/tokenService');
 
 const handleModelsList = async (req, res) => {
   try {
     const providerManager = req.app.locals.providerManager;
     const providersInfo = providerManager.getProvidersInfo();
+    const modelInstances = [];
 
-    // Get unique models from all active providers with tier info
-    const uniqueModels = new Map(); // Use Map to track unique models with their info
-    const modelCounts = new Map(); // Track counts of each model
+    // Get performance stats for each provider
+    const providerStats = await Promise.all(
+      providersInfo
+        .filter(provider => provider.status === 'active')
+        .map(async provider => {
+          const stats = await TokenService.getProviderStats(provider.userId, '24h');
+          return {
+            providerId: provider.id,
+            userId: provider.userId,
+            stats: stats || {
+              totalRequests: 0,
+              totalTokens: 0,
+              totalEarned: 0,
+              avgTokensPerSecond: 0,
+              maxTokensPerSecond: 0,
+              avgDurationSeconds: 0,
+              failedRequests: 0,
+              successRate: 100 // Default to 100% for new providers
+            },
+            models: provider.models,
+            lastHeartbeat: provider.lastHeartbeat
+          };
+        })
+    );
 
-    providersInfo.forEach(provider => {
-      if (provider.status === 'active') {
-        provider.models.forEach(model => {
-          // Update count for this model
-          modelCounts.set(model, (modelCounts.get(model) || 0) + 1);
-          
-          if (!uniqueModels.has(model)) {
-            const modelInfo = ModelManager.getModelInfo(model);
-            uniqueModels.set(model, {
-              id: model,
-              object: "model",
-              created: Date.now(),
-              owned_by: "llmule",
-              root: model,
-              parent: null,
-              tier: modelInfo.tier, // Add tier info
-              context_length: modelInfo.context || 4096,
-              permission: [],
-              provider_count: modelCounts.get(model) // Add count of providers using this model
-            });
-          } else {
-            // Update the count for existing model
-            const modelData = uniqueModels.get(model);
-            modelData.provider_count = modelCounts.get(model);
-            uniqueModels.set(model, modelData);
+    // Process each provider's models
+    for (const provider of providerStats) {
+      const { stats, models, userId, lastHeartbeat } = provider;
+      
+      for (const model of models) {
+        const modelInfo = ModelManager.getModelInfo(model);
+        
+        // Calculate time since last heartbeat
+        const lastActive = new Date(lastHeartbeat);
+        const timeSinceActive = Math.floor((Date.now() - lastActive.getTime()) / 1000);
+        const isOnline = timeSinceActive < 300; // Consider offline after 5 minutes
+
+        // Format user ID consistently
+        const shortUserId = userId ? `user_${userId.toString().substring(0, 6)}` : 'anonymous';
+        
+        // Create a unique model ID that includes provider info using the same format as user_id
+        const llmuleId = `${model}@${shortUserId}`;
+
+        // Get performance stats from provider stats
+        const performance = {
+          success_rate: Number(stats.successRate || 100),
+          total_requests: stats.totalRequests || 0,
+          avg_tokens_per_second: Math.round(stats.avgTokensPerSecond || 0),
+          max_tokens_per_second: Math.round(stats.maxTokensPerSecond || 0),
+          avg_duration_seconds: Math.round(stats.avgDurationSeconds || 0)
+        };
+
+        modelInstances.push({
+          id: llmuleId, // Unique identifier using consistent user ID format
+          object: "model",
+          created: Date.now(),
+          owned_by: "llmule",
+          root: model, // The base model name
+          parent: null,
+          tier: modelInfo.tier,
+          context_length: modelInfo.context || 4096,
+          permission: [],
+          provider: {
+            user_id: shortUserId,
+            ...performance,
+            last_active_seconds_ago: timeSinceActive,
+            status: isOnline ? 'online' : 'offline'
           }
         });
       }
+    }
+
+    // Sort models by performance metrics (avg tokens/sec) within their tier
+    modelInstances.sort((a, b) => {
+      if (a.tier !== b.tier) {
+        return ['xl', 'large', 'medium', 'small'].indexOf(a.tier) - 
+               ['xl', 'large', 'medium', 'small'].indexOf(b.tier);
+      }
+      return (b.provider.avg_tokens_per_second || 0) - (a.provider.avg_tokens_per_second || 0);
     });
 
-    // Convert to array and format response
-    const models = Array.from(uniqueModels.values());
-
-    // Return in the expected format with added tier info
     res.json({
       object: "list",
-      data: models,
-      record_count: models.length
+      data: modelInstances,
+      record_count: modelInstances.length
     });
 
   } catch (error) {

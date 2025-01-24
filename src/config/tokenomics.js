@@ -76,6 +76,14 @@ const tokenConfig = {
       const mules = this.tokensToMules(tokens, tier);
       return mules * (1 - tokenConfig.fees.platform_fee);
     }
+
+    static calculatePlatformFee(muleAmount) {
+      if (typeof muleAmount !== 'number' || isNaN(muleAmount) || muleAmount < 0) {
+        console.error('Invalid mule amount for fee calculation:', muleAmount);
+        return 0;
+      }
+      return parseFloat((muleAmount * tokenConfig.fees.platform_fee).toFixed(6));
+    }
     
     static formatMules(amount) {
       if (typeof amount !== 'number' || isNaN(amount)) {

@@ -46,6 +46,18 @@ const handleLLMRequest = async (req, res) => {
     const { selectedModel, socketId, userId } = await selectModelAndProvider(req.body.model);
     const modelInfo = ModelManager.getModelInfo(selectedModel);
     
+    // Check user balance before processing request
+    const userBalance = await TokenService.getBalance(req.user._id);
+    const estimatedTokens = req.body.max_tokens || modelInfo.context;
+    const estimatedCost = TokenCalculator.tokensToMules(estimatedTokens, modelInfo.tier);
+    
+    if (userBalance.balance < estimatedCost) {
+      throw {
+        code: 'INSUFFICIENT_BALANCE',
+        message: `Insufficient balance. Required: ${estimatedCost.toFixed(6)} MULE, Available: ${userBalance.balance.toFixed(6)} MULE`
+      };
+    }
+    
     const response = await processLLMRequest(
       selectedModel,
       socketId, // Use socketId for WebSocket communication
@@ -56,16 +68,19 @@ const handleLLMRequest = async (req, res) => {
     const usage = calculateUsage(response, modelInfo);
     const timing = RequestTimer.endRequest(requestId, usage.total_tokens);
 
-    await logUsage({
-      consumerId: req.user._id,
-      providerId: userId, // Use MongoDB ObjectId for logging
-      model: selectedModel,
-      modelInfo,
-      usage,
-      timing
-    });
+    // Only log usage if we have valid IDs
+    if (req.user._id && userId) {
+      await logUsage({
+        consumerId: req.user._id,
+        providerId: userId,
+        model: selectedModel,
+        modelInfo,
+        usage,
+        timing
+      });
+    }
 
-    const isSelfService = req.user._id.toString() === userId.toString();
+    const isSelfService = req.user._id && userId ? req.user._id.toString() === userId.toString() : false;
     const muleAmount = TokenCalculator.tokensToMules(usage.total_tokens, modelInfo.tier);
 
     const formattedResponse = formatResponse({
@@ -237,16 +252,12 @@ async function logUsage({
   usage, 
   timing 
 }) {
-  console.log('Logging usage:', { 
-    consumerId: consumerId.toString(),
-    providerId: providerId,
-    model,
-    usage,
-    timing,
-    modelInfo 
-  });
-  
   try {
+    // Validate IDs first
+    if (!consumerId || !providerId) {
+      throw new Error('Missing required IDs');
+    }
+
     // Ensure both IDs are MongoDB ObjectIds
     const consumerObjectId = typeof consumerId === 'string' ? 
       new mongoose.Types.ObjectId(consumerId) : consumerId;
@@ -254,13 +265,15 @@ async function logUsage({
     const providerObjectId = typeof providerId === 'string' ? 
       new mongoose.Types.ObjectId(providerId) : providerId;
 
-    if (!providerObjectId) {
-      console.error('Provider validation failed:', {
-        providerId,
-        type: typeof providerId
-      });
-      throw new Error('Invalid provider ID - registration required');
-    }
+    // Log after validation
+    console.log('Logging usage:', { 
+      consumerId: consumerObjectId.toString(),
+      providerId: providerObjectId.toString(),
+      model,
+      usage,
+      timing,
+      modelInfo 
+    });
 
     const validatedUsage = {
       prompt_tokens: Math.max(0, usage.prompt_tokens || 0),
@@ -286,22 +299,25 @@ async function logUsage({
       }
     });
 
-    // Log successful transaction
-    console.log('Usage logged successfully:', {
-      consumerId: consumerObjectId.toString(),
-      providerId: providerObjectId.toString(),
-      transactionId: result._id.toString(),
-      muleAmount: result.muleAmount
-    });
+    // Log successful transaction only if result exists
+    if (result && result._id) {
+      console.log('Usage logged successfully:', {
+        consumerId: consumerObjectId.toString(),
+        providerId: providerObjectId.toString(),
+        transactionId: result._id.toString(),
+        muleAmount: result.muleAmount
+      });
+    }
 
     return {
-      muleAmount: result.muleAmount,
-      isSelfService: result.transactionType === 'self_service'
+      muleAmount: result?.muleAmount || 0,
+      isSelfService: result?.transactionType === 'self_service'
     };
 
   } catch (error) {
     console.error('Error logging usage:', error);
-    if (error.message === 'Invalid provider ID - registration required') {
+    if (error.message === 'Invalid provider ID - registration required' || 
+        error.message === 'Missing required IDs') {
       throw error;
     }
     if (error.name === 'BSONTypeError' || error.name === 'CastError') {

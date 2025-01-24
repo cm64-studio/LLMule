@@ -2,7 +2,7 @@
 const { v4: uuidv4 } = require('uuid');
 const User = require('../models/userModel');
 const { ModelManager } = require('../config/models');
-const Provider = require('../models/providerModel');
+const { Provider } = require('../models/providerModel');
 const WebSocket = require('ws');
 class ProviderManager {
   constructor() {
@@ -206,8 +206,18 @@ class ProviderManager {
   async findAvailableProvider(requestedModel) {
     let targetModel = requestedModel;
     let filterInfo = null;
+    let specificProviderId = null;
    
-    if (requestedModel.includes('|')) {
+    // Handle specific provider model requests
+    if (requestedModel.includes('@')) {
+      const [modelName, providerId] = requestedModel.split('@');
+      targetModel = modelName;
+      // Extract the actual ID from user_XXXXXX format
+      specificProviderId = providerId.startsWith('user_') ? 
+        providerId.substring(5) : providerId;
+    }
+    // Handle tier|model format
+    else if (requestedModel.includes('|')) {
       const [tier, modelType] = requestedModel.split('|');
       filterInfo = { tier, modelType };
     }
@@ -219,6 +229,14 @@ class ProviderManager {
         const hasWebSocket = provider.ws && provider.ws.readyState === WebSocket.OPEN;
         const currentLoad = this.requestQueue.get(socketId) || 0;
         const isAvailable = currentLoad < this.loadBalancingThreshold;
+        
+        // If specific provider requested, check provider ID
+        if (specificProviderId) {
+          const providerShortId = provider.userId.toString().substring(0, 6);
+          if (providerShortId !== specificProviderId) {
+            return false;
+          }
+        }
    
         if (!isActive || !isReady || !hasWebSocket || !isAvailable) return false;
    
@@ -230,7 +248,7 @@ class ProviderManager {
           });
         }
    
-        return this._checkModelCompatibility(provider.models, requestedModel);
+        return this._checkModelCompatibility(provider.models, targetModel);
       });
    
     if (eligibleProviders.length === 0) return null;
@@ -251,11 +269,20 @@ class ProviderManager {
       userId: selected.provider.userId,
       model: targetModel 
     };
-   }
+  }
 
   _checkModelCompatibility(providerModels, requestedModel) {
     if (!requestedModel) return false;
   
+    // Handle specific provider model requests (model@userId format)
+    if (requestedModel.includes('@')) {
+      const [modelName, providerId] = requestedModel.split('@');
+      // Check if this provider has this exact model
+      return providerModels.some(model => 
+        this._isExactModelMatch(model, modelName)
+      );
+    }
+
     // Handle combined type|model requests 
     if (requestedModel.includes('|')) {
       const [tier, modelType] = requestedModel.toLowerCase().split('|');
@@ -357,8 +384,24 @@ class ProviderManager {
 
   async _getProviderPerformance(userId) {
     try {
+      if (!userId) {
+        return { tokens_per_second: 0 };
+      }
+
+      // First check the performance cache
+      const socketId = Array.from(this.providers.entries())
+        .find(([_, provider]) => provider.userId?.toString() === userId?.toString())?.[0];
+      
+      if (socketId) {
+        const cachedPerf = this.performanceCache.get(socketId);
+        if (cachedPerf && Date.now() - cachedPerf.last_updated < 300000) { // 5 minutes cache
+          return { tokens_per_second: cachedPerf.tokens_per_second };
+        }
+      }
+
+      // If not in cache or expired, get from database
       const provider = await Provider.findOne(
-        { userId },
+        { userId: userId },
         { 'performance.history': { $slice: -10 } }
       );
 
@@ -369,8 +412,16 @@ class ProviderManager {
       // Calculate average performance from recent history
       const recentPerformance = provider.performance.history;
       const avgTokensPerSecond = recentPerformance.reduce(
-        (acc, curr) => acc + curr.tokens_per_second, 0
+        (acc, curr) => acc + (curr.tokens_per_second || 0), 0
       ) / recentPerformance.length;
+
+      // Update cache
+      if (socketId) {
+        this.performanceCache.set(socketId, {
+          tokens_per_second: avgTokensPerSecond,
+          last_updated: Date.now()
+        });
+      }
 
       return { tokens_per_second: avgTokensPerSecond };
     } catch (error) {
@@ -454,6 +505,42 @@ class ProviderManager {
     }
   }
 
+  async updateProviderPerformance(socketId, performance) {
+    try {
+      const provider = this.providers.get(socketId);
+      if (!provider || !provider.userId) return;
+
+      // Update performance cache
+      this.performanceCache.set(socketId, {
+        tokens_per_second: performance.tokens_per_second,
+        last_updated: Date.now()
+      });
+
+      // Update Provider model
+      await Provider.findOneAndUpdate(
+        { userId: provider.userId },
+        {
+          $push: {
+            'performance.history': {
+              timestamp: new Date(),
+              tokens_per_second: performance.tokens_per_second,
+              duration_seconds: performance.duration_seconds,
+              success: true
+            }
+          },
+          $inc: {
+            'performance.total_requests': 1,
+            'performance.successful_requests': 1,
+            'performance.total_tokens': performance.total_tokens || 0
+          }
+        },
+        { upsert: true }
+      );
+    } catch (error) {
+      console.error('Error updating provider performance:', error);
+    }
+  }
+
   handleCompletionResponse(requestId, response) {
     const pendingRequest = this.pendingRequests.get(requestId);
     if (!pendingRequest) {
@@ -466,12 +553,14 @@ class ProviderManager {
       const currentQueue = this.requestQueue.get(pendingRequest.socketId) || 1;
       this.requestQueue.set(pendingRequest.socketId, Math.max(0, currentQueue - 1));
 
-      // Update performance cache if successful
+      // Update performance metrics if response includes usage data
       if (response.usage) {
-        this.performanceCache.set(pendingRequest.socketId, {
+        const performance = {
           tokens_per_second: response.usage.tokens_per_second,
-          last_updated: Date.now()
-        });
+          duration_seconds: response.usage.duration_seconds,
+          total_tokens: response.usage.total_tokens
+        };
+        this.updateProviderPerformance(pendingRequest.socketId, performance);
       }
 
       // Complete the request
