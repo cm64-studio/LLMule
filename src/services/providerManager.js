@@ -198,10 +198,13 @@ class ProviderManager {
     }
   }
 
-
-
-
-  // In providerManager.js
+  // Helper function to generate a deterministic number from MongoDB ID
+  _generateProviderNumber(userId) {
+    // Convert the first 4 bytes of MongoDB ObjectId to a number
+    const idHex = userId.toString().substring(0, 8);
+    const number = parseInt(idHex, 16) % 1000000; // Keep it to 6 digits max
+    return number.toString();
+  }
 
   async findAvailableProvider(requestedModel) {
     let targetModel = requestedModel;
@@ -212,7 +215,7 @@ class ProviderManager {
     if (requestedModel.includes('@')) {
       const [modelName, providerId] = requestedModel.split('@');
       targetModel = modelName;
-      // Extract the actual ID from user_XXXXXX format
+      // Extract the number from user_XXXXXX format
       specificProviderId = providerId.startsWith('user_') ? 
         providerId.substring(5) : providerId;
     }
@@ -232,8 +235,9 @@ class ProviderManager {
         
         // If specific provider requested, check provider ID
         if (specificProviderId) {
-          const providerShortId = provider.userId.toString().substring(0, 6);
-          if (providerShortId !== specificProviderId) {
+          // Generate the provider number for comparison
+          const providerNumber = this._generateProviderNumber(provider.userId);
+          if (providerNumber !== specificProviderId) {
             return false;
           }
         }
