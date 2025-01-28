@@ -192,7 +192,7 @@ class ModelManager {
       return this._handleCombinedRequest(tierOrType, model);
     }
     
-    console.log('Getting model info for:', modelName);
+    //console.log('Getting model info for:', modelName);
   
     // Direct tier request
     if (['small', 'medium', 'large', 'xl'].includes(modelName.toLowerCase())) {

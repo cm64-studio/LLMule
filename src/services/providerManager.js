@@ -44,7 +44,7 @@ class ProviderManager {
 
       try {
         provider.ws.ping();
-        console.log(`Ping sent to provider ${socketId}`);
+        //console.log(`Ping sent to provider ${socketId}`);
       } catch (error) {
         console.error(`Error pinging provider ${socketId}:`, {
           error: error.message,
