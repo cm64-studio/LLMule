@@ -16,8 +16,9 @@ class ProviderManager {
     this.requestQueue = new Map(); // Track pending requests per provider
     this.performanceCache = new Map(); // Cache provider performance metrics
     this.loadBalancingThreshold = 5; // Max requests before load balancing kicks in
+    this.requestTimeout = process.env.REQUEST_TIMEOUT_MS || 180000; // 3 minutes default timeout
 
-    console.log('ProviderManager initialized with heartbeat monitoring');
+    console.log('ProviderManager initialized with heartbeat monitoring and request timeout:', this.requestTimeout, 'ms');
   }
 
   startHeartbeatMonitor(socketId) {
@@ -30,25 +31,31 @@ class ProviderManager {
     const interval = setInterval(() => {
       const provider = this.providers.get(socketId);
       if (!provider || !provider.ws) {
+        console.log(`No provider or WebSocket found for ${socketId}, clearing heartbeat`);
         this.clearHeartbeat(socketId);
         return;
       }
 
       if (Date.now() - provider.lastHeartbeat > this.timeoutThreshold) {
-        console.log(`Provider ${socketId} timed out - removing`);
+        console.log(`Provider ${socketId} timed out after ${this.timeoutThreshold}ms - removing`);
         this.removeProvider(socketId);
         return;
       }
 
       try {
         provider.ws.ping();
+        console.log(`Ping sent to provider ${socketId}`);
       } catch (error) {
-        console.error(`Error pinging provider ${socketId}:`, error);
+        console.error(`Error pinging provider ${socketId}:`, {
+          error: error.message,
+          stack: error.stack
+        });
         this.removeProvider(socketId);
       }
     }, this.heartbeatInterval);
 
     this.pingIntervals.set(socketId, interval);
+    console.log(`Heartbeat monitor started for provider ${socketId}`);
   }
 
   clearHeartbeat(socketId) {
@@ -61,6 +68,7 @@ class ProviderManager {
   setupWebSocketHandlers(socketId, ws) {
     // Handle pong responses
     ws.on('pong', () => {
+      //console.log(`Received pong from provider ${socketId}`);
       const provider = this.providers.get(socketId);
       if (provider) {
         provider.lastHeartbeat = Date.now();
@@ -69,16 +77,36 @@ class ProviderManager {
     });
 
     // Handle close
-    ws.on('close', () => {
-      console.log(`Provider ${socketId} WebSocket closed`);
-      this.removeProvider(socketId);
+    ws.on('close', (code, reason) => {
+      console.log(`Provider ${socketId} WebSocket closed`, {
+        code,
+        reason: reason.toString(),
+        wasClean: code === 1000
+      });
+      
+      // Only remove if this wasn't triggered by our own removeProvider call
+      // and it wasn't a clean close
+      if (reason.toString() !== 'Provider removed' && code !== 1000) {
+        this.removeProvider(socketId);
+      }
     });
 
     // Handle errors
     ws.on('error', (error) => {
-      console.error(`Provider ${socketId} WebSocket error:`, error);
-      this.removeProvider(socketId);
+      console.error(`Provider ${socketId} WebSocket error:`, {
+        error: error.message,
+        stack: error.stack
+      });
+      // Don't remove provider immediately on error, let the close handler decide
     });
+
+    // Initial ping to verify connection
+    try {
+      ws.ping();
+      console.log(`Initial ping sent to provider ${socketId}`);
+    } catch (error) {
+      console.error(`Error sending initial ping to provider ${socketId}:`, error);
+    }
   }
 
   handleConnection(ws, providerId) {
@@ -94,31 +122,70 @@ class ProviderManager {
 
 
   async registerProvider(socketId, providerInfo) {
-    if (!providerInfo.apiKey) {
-      console.error('Provider registration failed: No API key provided');
-      return false;
-    }
-
     try {
-      const user = await User.findOne({
-        apiKey: providerInfo.apiKey,
-        emailVerified: true,
-        status: 'active'
-      });
-
-      if (!user) {
-        console.error('Provider registration failed: Invalid or inactive user');
-        return false;
-      }
-
       // Ensure we have a websocket instance
       if (!providerInfo.ws) {
         console.error('Provider registration failed: No WebSocket provided');
-        return false;
+        return { success: false, status: 'error', message: 'No WebSocket provided' };
+      }
+
+      // Check if this provider is already registered
+      const existingProvider = this.providers.get(socketId);
+      if (existingProvider && existingProvider.status === 'active') {
+        console.log('Provider already registered and active:', {
+          socketId,
+          userId: existingProvider.userId?.toString()
+        });
+        // Send success response to avoid client retries
+        providerInfo.ws.send(JSON.stringify({
+          type: 'registered',
+          message: 'Already registered as provider'
+        }));
+        return { success: true, status: 'existing' };
+      }
+
+      // Check authentication methods
+      const apiKey = providerInfo.apiKey || providerInfo.ws.apiKey;
+      const userId = providerInfo.userId;
+
+      if (!apiKey && !userId) {
+        console.error('Provider registration failed: No authentication provided');
+        return { success: false, status: 'error', message: 'No authentication provided' };
+      }
+
+      // Build query based on available authentication
+      const query = {
+        emailVerified: true,
+        status: 'active'
+      };
+
+      if (apiKey) {
+        query.apiKey = apiKey;
+      } else if (userId) {
+        query._id = userId;
+      }
+
+      const user = await User.findOne(query);
+
+      if (!user) {
+        console.error('Provider registration failed: Invalid or inactive user');
+        return { success: false, status: 'error', message: 'Invalid or inactive user' };
+      }
+
+      // Check for duplicate models in the registration request
+      const uniqueModels = [...new Set(providerInfo.models)];
+      if (uniqueModels.length !== providerInfo.models.length) {
+        console.error('Provider registration failed: Duplicate models detected in registration', {
+          socketId,
+          userId: user._id.toString(),
+          duplicates: providerInfo.models.filter((model, index) => providerInfo.models.indexOf(model) !== index)
+        });
+        return { success: false, status: 'error', message: 'Duplicate models detected' };
       }
 
       const providerData = {
         ...providerInfo,
+        models: uniqueModels,
         userId: user._id,
         lastHeartbeat: Date.now(),
         status: 'active',
@@ -138,24 +205,26 @@ class ProviderManager {
       this.startHeartbeatMonitor(socketId);
 
       // Log registration with proper array format
-      console.log('Provider registered successfully:', {
+      console.log('New provider registration:', {
         socketId,
         userId: user._id.toString(),
         hasWebSocket: !!providerData.ws,
         wsState: providerData.ws.readyState,
-        models: providerData.models // Log the array directly
+        models: providerData.models,
+        modelCount: providerData.models.length,
+        authMethod: apiKey ? 'apiKey' : 'userId'
       });
 
-      // Debug log model tiers
-      console.log('Registered models tiers:', providerData.models.map(model => ({
-        model,
-        tier: ModelManager.getModelInfo(model).tier
-      })));
+      // Send success response to client
+      providerData.ws.send(JSON.stringify({
+        type: 'registered',
+        message: 'Successfully registered as provider'
+      }));
 
-      return true;
+      return { success: true, status: 'new' };
     } catch (error) {
       console.error('Provider registration failed:', error);
-      return false;
+      return { success: false, status: 'error', message: error.message };
     }
   }
 
@@ -172,17 +241,37 @@ class ProviderManager {
 
     // Clean up provider data
     const provider = this.providers.get(socketId);
-    if (provider && provider.ws) {
-      try {
-        provider.ws.terminate();
-      } catch (error) {
-        console.error(`Error terminating WebSocket for ${socketId}:`, error);
+    if (provider) {
+      // Log provider details before removal
+      console.log(`Provider details before removal:`, {
+        socketId,
+        userId: provider.userId?.toString(),
+        status: provider.status,
+        models: provider.models,
+        lastHeartbeat: new Date(provider.lastHeartbeat).toISOString()
+      });
+
+      if (provider.ws && provider.ws.readyState === WebSocket.OPEN) {
+        try {
+          // Only close if it's not already closing/closed
+          provider.ws.close(1000, 'Provider removed');
+        } catch (error) {
+          console.error(`Error closing WebSocket for ${socketId}:`, error);
+          try {
+            provider.ws.terminate();
+          } catch (termError) {
+            console.error(`Error terminating WebSocket for ${socketId}:`, termError);
+          }
+        }
       }
     }
 
+    // Clean up maps
     this.providers.delete(socketId);
     this.providerUserIds.delete(socketId);
     this.requestCounts.delete(socketId);
+    this.performanceCache.delete(socketId);
+    this.requestQueue.delete(socketId);
 
     this.logProvidersState();
   }
@@ -389,7 +478,10 @@ class ProviderManager {
   async _getProviderPerformance(userId) {
     try {
       if (!userId) {
-        return { tokens_per_second: 0 };
+        return { 
+          tokens_per_second: 0,
+          total_requests: 0
+        };
       }
 
       // First check the performance cache
@@ -398,39 +490,65 @@ class ProviderManager {
       
       if (socketId) {
         const cachedPerf = this.performanceCache.get(socketId);
-        if (cachedPerf && Date.now() - cachedPerf.last_updated < 300000) { // 5 minutes cache
-          return { tokens_per_second: cachedPerf.tokens_per_second };
+        // Reduce cache time to 1 minute for more frequent updates
+        if (cachedPerf && Date.now() - cachedPerf.last_updated < 60000) {
+          return { 
+            tokens_per_second: cachedPerf.tokens_per_second,
+            total_requests: cachedPerf.total_requests || 0
+          };
         }
       }
 
       // If not in cache or expired, get from database
       const provider = await Provider.findOne(
         { userId: userId },
-        { 'performance.history': { $slice: -10 } }
+        { 
+          'performance.history': { $slice: -5 }, // Only get last 5 entries for more recent performance
+          'performance.total_requests': 1,
+          'performance.successful_requests': 1,
+          'performance.failed_requests': 1
+        }
       );
 
-      if (!provider?.performance?.history?.length) {
-        return { tokens_per_second: 0 };
+      if (!provider?.performance) {
+        return { 
+          tokens_per_second: 0,
+          total_requests: 0
+        };
       }
 
-      // Calculate average performance from recent history
-      const recentPerformance = provider.performance.history;
-      const avgTokensPerSecond = recentPerformance.reduce(
-        (acc, curr) => acc + (curr.tokens_per_second || 0), 0
-      ) / recentPerformance.length;
+      // Calculate weighted average giving more importance to recent entries
+      const recentPerformance = provider.performance.history || [];
+      let totalWeight = 0;
+      const avgTokensPerSecond = recentPerformance.length > 0 ? 
+        recentPerformance.reduce((acc, curr, idx) => {
+          // Weight formula: newer entries get higher weight
+          const weight = Math.pow(2, idx); // 1, 2, 4, 8, 16 for last 5 entries
+          totalWeight += weight;
+          return acc + (curr.tokens_per_second || 0) * weight;
+        }, 0) / totalWeight : 0;
+
+      const totalRequests = provider.performance.total_requests || 0;
 
       // Update cache
       if (socketId) {
         this.performanceCache.set(socketId, {
           tokens_per_second: avgTokensPerSecond,
+          total_requests: totalRequests,
           last_updated: Date.now()
         });
       }
 
-      return { tokens_per_second: avgTokensPerSecond };
+      return { 
+        tokens_per_second: avgTokensPerSecond,
+        total_requests: totalRequests
+      };
     } catch (error) {
       console.error('Error getting provider performance:', error);
-      return { tokens_per_second: 0 };
+      return { 
+        tokens_per_second: 0,
+        total_requests: 0
+      };
     }
   }
 
@@ -446,45 +564,88 @@ class ProviderManager {
     const requestId = uuidv4();
     
     return new Promise((resolve, reject) => {
+      // Set timeout (use configured timeout or default to 60 seconds)
+      const timeoutDuration = requestData.timeout || this.requestTimeout;
       const timeout = setTimeout(() => {
-        this.pendingRequests.delete(requestId);
-        this.requestCounts.set(providerInfo.socketId, 
-          (this.requestCounts.get(providerInfo.socketId) || 1) - 1);
-        reject(new Error('Request timeout after 5 minutes')); 
-      }, 300000);
+        this._handleRequestTimeout(requestId, providerInfo.socketId);
+        reject(new Error(`Request timeout after ${timeoutDuration/1000} seconds`)); 
+      }, timeoutDuration);
    
       this.pendingRequests.set(requestId, {
         resolve,
         reject, 
         timeout,
         socketId: providerInfo.socketId,
-        providerId: providerInfo.userId
+        providerId: providerInfo.userId,
+        startTime: Date.now() // Record exact start time when request is about to be sent
       });
    
       try {
+        // Update request queue count
+        const currentQueue = this.requestQueue.get(providerInfo.socketId) || 0;
+        this.requestQueue.set(providerInfo.socketId, currentQueue + 1);
+
         const message = {
           type: 'completion_request',
           requestId,
-          model: providerInfo.model, // Use actual model from provider
+          model: providerInfo.model,
           messages: requestData.messages,
           temperature: requestData.temperature,
           max_tokens: requestData.max_tokens
         };
    
+        // Start timing just before sending the request
+        const RequestTimer = require('../utils/requestTimer');
+        RequestTimer.startRequest(requestId);
+   
         provider.ws.send(JSON.stringify(message), (error) => {
           if (error) {
-            clearTimeout(timeout);
-            this.pendingRequests.delete(requestId);
+            RequestTimer.endRequest(requestId, 0); // End timing on error
+            this._handleRequestTimeout(requestId, providerInfo.socketId);
             reject(new Error('Failed to send request to provider'));
           }
         });
       } catch (error) {
-        clearTimeout(timeout);
-        this.pendingRequests.delete(requestId);
+        RequestTimer.endRequest(requestId, 0); // End timing on error
+        this._handleRequestTimeout(requestId, providerInfo.socketId);
         reject(error); 
       }
     });
-   }
+  }
+
+  _handleRequestTimeout(requestId, socketId) {
+    const pendingRequest = this.pendingRequests.get(requestId);
+    if (!pendingRequest) return;
+
+    // Clear the timeout
+    clearTimeout(pendingRequest.timeout);
+    
+    // Update request queue count
+    const currentQueue = this.requestQueue.get(socketId) || 1;
+    this.requestQueue.set(socketId, Math.max(0, currentQueue - 1));
+    
+    // Calculate duration and update provider performance with failed request
+    const duration = (Date.now() - pendingRequest.startTime) / 1000;
+    const performance = {
+      tokens_per_second: 0,
+      duration_seconds: duration,
+      total_tokens: 0,
+      success: false
+    };
+
+    // Log timeout for debugging
+    console.log('Request timeout:', {
+      requestId,
+      socketId,
+      duration_seconds: duration,
+      provider: this.providers.get(socketId)?.userId?.toString()
+    });
+    
+    this.updateProviderPerformance(socketId, performance);
+    
+    // Clean up the pending request
+    this.pendingRequests.delete(requestId);
+  }
 
   _matchModelTier(providerModel, requestedModel) {
     // Get model info from ModelManager
@@ -514,34 +675,73 @@ class ProviderManager {
       const provider = this.providers.get(socketId);
       if (!provider || !provider.userId) return;
 
-      // Update performance cache
+      // Validate performance data
+      const validatedPerformance = {
+        tokens_per_second: Math.max(0, parseInt(performance.tokens_per_second) || 0),
+        duration_seconds: Math.max(0, parseFloat(performance.duration_seconds) || 0),
+        total_tokens: Math.max(0, parseInt(performance.total_tokens) || 0),
+        success: Boolean(performance.success) // Ensure it's a boolean
+      };
+
+      // Update performance cache with request count
+      const currentCache = this.performanceCache.get(socketId) || {};
       this.performanceCache.set(socketId, {
-        tokens_per_second: performance.tokens_per_second,
+        tokens_per_second: validatedPerformance.tokens_per_second,
+        total_requests: (currentCache.total_requests || 0) + 1,
         last_updated: Date.now()
       });
 
-      // Update Provider model
-      await Provider.findOneAndUpdate(
+      // Log performance update for debugging
+      console.log('Updating provider performance:', {
+        providerId: provider.userId.toString(),
+        socketId,
+        performance: {
+          ...validatedPerformance,
+          cached_total_requests: (currentCache.total_requests || 0) + 1
+        }
+      });
+
+      // Update Provider model with atomic operations
+      const result = await Provider.findOneAndUpdate(
         { userId: provider.userId },
         {
           $push: {
             'performance.history': {
               timestamp: new Date(),
-              tokens_per_second: performance.tokens_per_second,
-              duration_seconds: performance.duration_seconds,
-              success: true
+              tokens_per_second: validatedPerformance.tokens_per_second,
+              duration_seconds: validatedPerformance.duration_seconds,
+              success: validatedPerformance.success
             }
           },
           $inc: {
             'performance.total_requests': 1,
-            'performance.successful_requests': 1,
-            'performance.total_tokens': performance.total_tokens || 0
+            'performance.successful_requests': validatedPerformance.success ? 1 : 0,
+            'performance.failed_requests': validatedPerformance.success ? 0 : 1,
+            'performance.total_tokens': validatedPerformance.total_tokens
           }
         },
-        { upsert: true }
+        { 
+          upsert: true,
+          new: true
+        }
       );
+
+      // Log the updated totals
+      console.log('Provider performance updated:', {
+        providerId: provider.userId.toString(),
+        total_requests: result?.performance?.total_requests || 0,
+        successful_requests: result?.performance?.successful_requests || 0,
+        failed_requests: result?.performance?.failed_requests || 0,
+        total_tokens: result?.performance?.total_tokens || 0
+      });
+
     } catch (error) {
-      console.error('Error updating provider performance:', error);
+      console.error('Error updating provider performance:', {
+        error: error.message,
+        stack: error.stack,
+        socketId,
+        provider: this.providers.get(socketId)?.userId?.toString()
+      });
     }
   }
 
@@ -557,23 +757,73 @@ class ProviderManager {
       const currentQueue = this.requestQueue.get(pendingRequest.socketId) || 1;
       this.requestQueue.set(pendingRequest.socketId, Math.max(0, currentQueue - 1));
 
-      // Update performance metrics if response includes usage data
-      if (response.usage) {
-        const performance = {
-          tokens_per_second: response.usage.tokens_per_second,
-          duration_seconds: response.usage.duration_seconds,
-          total_tokens: response.usage.total_tokens
+      // Check if response is valid
+      const isValidResponse = response && 
+        response.choices && 
+        Array.isArray(response.choices) && 
+        response.choices.length > 0 &&
+        response.choices[0].message &&
+        response.choices[0].message.content;
+
+      // Get timing from RequestTimer
+      const RequestTimer = require('../utils/requestTimer');
+      const timing = RequestTimer.endRequest(requestId, response?.usage?.completion_tokens || 0);
+
+      // Calculate tokens per second based only on completion tokens
+      const tokensPerSecond = timing && response?.usage?.completion_tokens ? 
+        Math.round(response.usage.completion_tokens / timing.duration_seconds) : 0;
+
+      // Update performance metrics with accurate timing
+      const performance = {
+        tokens_per_second: tokensPerSecond,
+        duration_seconds: timing?.duration_seconds || 0,
+        total_tokens: response?.usage?.total_tokens || 0,
+        success: isValidResponse
+      };
+      
+      // Log performance metrics for debugging
+      console.log('Performance metrics for request:', {
+        requestId,
+        socketId: pendingRequest.socketId,
+        performance,
+        responseValid: isValidResponse,
+        timing: timing || null,
+        usage: response?.usage
+      });
+
+      this.updateProviderPerformance(pendingRequest.socketId, performance);
+
+      // Add timing to response
+      if (timing && response) {
+        response.usage = {
+          ...response.usage,
+          duration_seconds: timing.duration_seconds,
+          tokens_per_second: tokensPerSecond
         };
-        this.updateProviderPerformance(pendingRequest.socketId, performance);
       }
 
       // Complete the request
       clearTimeout(pendingRequest.timeout);
       this.pendingRequests.delete(requestId);
-      pendingRequest.resolve(response);
+
+      if (!isValidResponse) {
+        pendingRequest.reject(new Error('Invalid response format: missing message content'));
+      } else {
+        pendingRequest.resolve(response);
+      }
 
     } catch (error) {
       console.error('Error handling completion response:', error);
+      
+      // Update performance metrics for failed request
+      const performance = {
+        tokens_per_second: 0,
+        duration_seconds: 0,
+        total_tokens: 0,
+        success: false
+      };
+      this.updateProviderPerformance(pendingRequest.socketId, performance);
+      
       pendingRequest.reject(error);
     }
   }

@@ -144,7 +144,7 @@ async function handleProviderMessage(ws, providerId, data) {
             type: 'error',
             error: 'Invalid registration data. Required: models and apiKey'
           }));
-          return;
+          return false;
         }
 
         const registrationData = {
@@ -161,25 +161,15 @@ async function handleProviderMessage(ws, providerId, data) {
           registrationData.userId = data.userId;
         }
 
-        const success = await providerManager.registerProvider(providerId, registrationData);
-
-        if (!success) {
-          logger.error('Provider registration failed', { providerId });
-          ws.send(JSON.stringify({
-            type: 'error',
-            error: 'Registration failed. Invalid API key or inactive user'
-          }));
-          ws.close();
-          return;
-        }
-
-        logger.info('Provider registered successfully', { providerId });
-        ws.send(JSON.stringify({
-          type: 'registered',
-          message: 'Successfully registered as provider'
-        }));
-        break;
+        const registrationResult = await providerManager.registerProvider(providerId, registrationData);
         
+        // Only log success for new registrations
+        if (registrationResult.status === 'new') {
+          logger.info('Provider registered successfully', { providerId });
+        }
+        
+        return registrationResult.success;
+
       case 'pong':
         providerManager.updateProviderStatus(providerId, 'active');
         break;
@@ -212,26 +202,46 @@ async function handleProviderMessage(ws, providerId, data) {
       type: 'error',
       error: 'Internal server error'
     }));
+    return false;
   }
+  return true;
 }
 
 // WebSocket connection handling
-wss.on('connection', (ws) => {
+wss.on('connection', (ws, req) => {
   const providerId = uuidv4();
-  logger.info('New provider connected', { providerId });
+  
+  // Extract API key from Authorization header
+  let apiKey = req.headers['x-api-key'];
+  if (!apiKey && req.headers['authorization']) {
+    const authHeader = req.headers['authorization'];
+    if (authHeader.startsWith('Bearer ')) {
+      apiKey = authHeader.substring(7);
+    }
+  }
+  
+  logger.info('New provider connected', { 
+    providerId,
+    hasApiKey: !!apiKey
+  });
   
   // Setup early connection tracking
   ws.isAlive = true;
   ws.lastPong = Date.now();
+  ws.apiKey = apiKey; // Store API key in ws object
   
   // Store initial provider state
   providerManager.providers.set(providerId, {
     ws,
+    apiKey, // Store API key in provider data
     status: 'connecting',
     readyForRequests: false,
     lastHeartbeat: Date.now(),
     models: [] // Will be populated on registration
   });
+  
+  // Track registration state
+  let isRegistered = false;
   
   ws.on('message', async (message) => {
     logger.debug('WebSocket Message received', { 
@@ -241,21 +251,44 @@ wss.on('connection', (ws) => {
 
     try {
       let data = JSON.parse(message);
+      
+      // If already registered, only process non-registration messages
+      if (isRegistered && data.type === 'register') {
+        logger.debug('Ignoring re-registration attempt', {
+          providerId,
+          status: 'already_registered'
+        });
+        ws.send(JSON.stringify({
+          type: 'registered',
+          message: 'Already registered as provider'
+        }));
+        return;
+      }
+      
       logger.info('Processing WebSocket message', {
         providerId,
-        type: data.type
+        type: data.type,
+        isRegistered
       });
       
       if (data.type === 'register') {
         logger.debug('Processing registration', {
           providerId,
           hasModels: !!data.models,
-          modelCount: data.models?.length
+          modelCount: data.models?.length,
+          hasUserId: !!data.userId
         });
         data.ws = ws;
+        data.apiKey = apiKey; // Add API key from headers to registration data
+        
+        // Update registration state after successful registration
+        const success = await handleProviderMessage(ws, providerId, data);
+        if (success) {
+          isRegistered = true;
+        }
+      } else {
+        await handleProviderMessage(ws, providerId, data);
       }
-      
-      await handleProviderMessage(ws, providerId, data);
     } catch (error) {
       logger.error('WebSocket message handling error', {
         providerId,

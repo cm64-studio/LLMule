@@ -389,99 +389,121 @@ class TokenService {
                     startDate.setHours(startDate.getHours() - 24);
             }
 
-            // Get transaction stats
-            const transactionStats = await Transaction.aggregate([
-                {
-                    $match: {
-                        providerId: new mongoose.Types.ObjectId(providerId),
-                        timestamp: { $gte: startDate }
-                    }
-                },
-                {
-                    $group: {
-                        _id: null,
-                        totalRequests: { $sum: 1 },
-                        totalTokens: { $sum: '$usage.totalTokens' },
-                        totalEarned: { $sum: '$muleAmount' },
-                        avgTokensPerSecond: { $avg: '$usage.tokens_per_second' },
-                        maxTokensPerSecond: { $max: '$usage.tokens_per_second' },
-                        avgDurationSeconds: { $avg: '$usage.duration_seconds' },
-                        failedRequests: {
-                            $sum: {
-                                $cond: [
-                                    { $lt: ['$usage.totalTokens', 1] },
-                                    1,
-                                    0
-                                ]
+            // Get both transaction stats and provider performance in parallel
+            const [transactionStats, provider] = await Promise.all([
+                Transaction.aggregate([
+                    {
+                        $match: {
+                            providerId: new mongoose.Types.ObjectId(providerId),
+                            timestamp: { $gte: startDate }
+                        }
+                    },
+                    {
+                        $group: {
+                            _id: null,
+                            totalRequests: { $sum: 1 },
+                            totalTokens: { $sum: '$usage.totalTokens' },
+                            totalEarned: { $sum: '$muleAmount' },
+                            avgTokensPerSecond: { $avg: '$usage.tokens_per_second' },
+                            maxTokensPerSecond: { $max: '$usage.tokens_per_second' },
+                            avgDurationSeconds: { $avg: '$usage.duration_seconds' },
+                            successfulRequests: {
+                                $sum: {
+                                    $cond: [
+                                        { $gt: ['$usage.totalTokens', 0] },
+                                        1,
+                                        0
+                                    ]
+                                }
                             }
                         }
                     }
-                },
-                {
-                    $project: {
-                        _id: 0,
-                        totalRequests: 1,
-                        totalTokens: 1,
-                        totalEarned: 1,
-                        avgTokensPerSecond: { $round: ['$avgTokensPerSecond', 2] },
-                        maxTokensPerSecond: { $round: ['$maxTokensPerSecond', 2] },
-                        avgDurationSeconds: { $round: ['$avgDurationSeconds', 2] },
-                        failedRequests: 1,
-                        successRate: {
-                            $multiply: [
-                                {
-                                    $divide: [
-                                        { $subtract: ['$totalRequests', '$failedRequests'] },
-                                        { $max: ['$totalRequests', 1] }
-                                    ]
-                                },
-                                100
-                            ]
-                        }
+                ]),
+                Provider.findOne(
+                    { userId: providerId },
+                    { 
+                        'performance.history': { $slice: -100 },
+                        'performance.total_requests': 1,
+                        'performance.successful_requests': 1,
+                        'performance.failed_requests': 1,
+                        'performance.total_tokens': 1
                     }
-                }
+                )
             ]);
 
-            // Get latest performance metrics from Provider model
-            const provider = await Provider.findOne(
-                { userId: providerId },
-                { 'performance.history': { $slice: -10 } }
-            );
-
-            let recentPerformance = {
-                avgTokensPerSecond: 0,
-                maxTokensPerSecond: 0
-            };
-
-            if (provider?.performance?.history?.length > 0) {
-                const recentHistory = provider.performance.history;
-                recentPerformance = {
-                    avgTokensPerSecond: Math.round(
-                        recentHistory.reduce((acc, curr) => acc + (curr.tokens_per_second || 0), 0) / 
-                        recentHistory.length
-                    ),
-                    maxTokensPerSecond: Math.round(
-                        Math.max(...recentHistory.map(h => h.tokens_per_second || 0))
-                    )
-                };
-            }
-
-            const stats = transactionStats[0] || {
+            // Get stats from transactions (last 24h)
+            const recentStats = transactionStats[0] || {
                 totalRequests: 0,
                 totalTokens: 0,
                 totalEarned: 0,
                 avgTokensPerSecond: 0,
                 maxTokensPerSecond: 0,
                 avgDurationSeconds: 0,
-                failedRequests: 0,
-                successRate: 100
+                successfulRequests: 0
             };
 
-            // Use the most recent metrics for performance
+            // Get stats from provider performance (all-time)
+            const providerStats = {
+                totalRequests: provider?.performance?.total_requests || 0,
+                successfulRequests: provider?.performance?.successful_requests || 0,
+                failedRequests: provider?.performance?.failed_requests || 0,
+                totalTokens: provider?.performance?.total_tokens || 0,
+                history: provider?.performance?.history || []
+            };
+
+            // Calculate success rate from recent transactions
+            const recentSuccessRate = recentStats.totalRequests > 0
+                ? ((recentStats.successfulRequests / recentStats.totalRequests) * 100)
+                : 100;
+
+            // Calculate performance metrics from recent history
+            let recentPerformance = {
+                avgTokensPerSecond: 0,
+                maxTokensPerSecond: 0
+            };
+
+            if (providerStats.history.length > 0) {
+                // Only consider successful requests for performance metrics
+                const successfulHistory = providerStats.history.filter(h => h.success);
+                if (successfulHistory.length > 0) {
+                    recentPerformance = {
+                        avgTokensPerSecond: Math.round(
+                            successfulHistory.reduce((acc, curr) => acc + (curr.tokens_per_second || 0), 0) / 
+                            successfulHistory.length
+                        ),
+                        maxTokensPerSecond: Math.round(
+                            Math.max(...successfulHistory.map(h => h.tokens_per_second || 0))
+                        )
+                    };
+                }
+            }
+
+            // Log stats for debugging
+            console.log('Provider stats calculation:', {
+                providerId,
+                recentStats: {
+                    totalRequests: recentStats.totalRequests,
+                    successfulRequests: recentStats.successfulRequests,
+                    successRate: recentSuccessRate
+                },
+                providerStats: {
+                    totalRequests: providerStats.totalRequests,
+                    successfulRequests: providerStats.successfulRequests,
+                    failedRequests: providerStats.failedRequests
+                },
+                performance: recentPerformance
+            });
+
+            // Combine stats, preferring recent metrics when available
             return {
-                ...stats,
-                avgTokensPerSecond: Math.max(stats.avgTokensPerSecond, recentPerformance.avgTokensPerSecond),
-                maxTokensPerSecond: Math.max(stats.maxTokensPerSecond, recentPerformance.maxTokensPerSecond)
+                totalRequests: providerStats.totalRequests,
+                totalTokens: providerStats.totalTokens,
+                totalEarned: recentStats.totalEarned,
+                avgTokensPerSecond: recentPerformance.avgTokensPerSecond,
+                maxTokensPerSecond: recentPerformance.maxTokensPerSecond,
+                avgDurationSeconds: recentStats.avgDurationSeconds || 0,
+                failedRequests: providerStats.failedRequests,
+                successRate: recentSuccessRate
             };
 
         } catch (error) {
