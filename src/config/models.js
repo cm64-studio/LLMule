@@ -184,8 +184,18 @@ class ModelManager {
   // }
 
   static getModelInfo(modelName) {
+    // Handle case when modelName is null or undefined
     if (!modelName) return this.createModelInfo('medium');
 
+    // Handle case when modelName is an object (like from your examples)
+    if (typeof modelName === 'object' && modelName !== null) {
+      // Extract the name property if it exists
+      modelName = modelName.name || modelName.id || '';
+    }
+    
+    // Make sure modelName is a string at this point
+    modelName = String(modelName);
+    
     // Handle combined type|model requests
     if (modelName.includes('|')) {
       const [tierOrType, model] = modelName.split('|');
@@ -256,8 +266,13 @@ class ModelManager {
   static validateModel(modelName) {
     if (!modelName) return false;
 
-    // Normalize model name
-    //const normalizedName = this._normalizeModelName(modelName);
+    // Handle case when modelName is an object
+    if (typeof modelName === 'object' && modelName !== null) {
+      modelName = modelName.name || modelName.id || '';
+    }
+    
+    // Ensure modelName is a string
+    modelName = String(modelName);
 
     // Direct tier requests are valid
     if (['small', 'medium', 'large', 'xl'].includes(modelName)) {

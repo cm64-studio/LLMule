@@ -136,10 +136,13 @@ class ProviderManager {
           socketId,
           userId: existingProvider.userId?.toString()
         });
-        // Send success response to avoid client retries
+        // Enhanced response for re-registration
         providerInfo.ws.send(JSON.stringify({
           type: 'registered',
-          message: 'Already registered as provider'
+          status: 'already_registered',
+          message: 'Already registered as provider',
+          socketId: socketId,
+          timestamp: Date.now()
         }));
         return { success: true, status: 'existing' };
       }
@@ -215,15 +218,34 @@ class ProviderManager {
         authMethod: apiKey ? 'apiKey' : 'userId'
       });
 
-      // Send success response to client
+      // Enhanced response for new registration
       providerData.ws.send(JSON.stringify({
         type: 'registered',
-        message: 'Successfully registered as provider'
+        status: 'newly_registered',
+        message: 'Successfully registered as provider',
+        socketId: socketId,
+        timestamp: Date.now()
       }));
+
+      // Log the registration response
+      console.log('Sent registration response:', {
+        socketId,
+        userId: user._id.toString(),
+        status: 'newly_registered',
+        timestamp: Date.now()
+      });
 
       return { success: true, status: 'new' };
     } catch (error) {
       console.error('Provider registration failed:', error);
+      // Send error response to client
+      if (providerInfo.ws) {
+        providerInfo.ws.send(JSON.stringify({
+          type: 'registration_error',
+          message: error.message,
+          timestamp: Date.now()
+        }));
+      }
       return { success: false, status: 'error', message: error.message };
     }
   }
