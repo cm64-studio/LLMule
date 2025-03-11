@@ -132,15 +132,14 @@ class ProviderManager {
       // Check if this provider is already registered
       const existingProvider = this.providers.get(socketId);
       if (existingProvider && existingProvider.status === 'active') {
-        console.log('Provider already registered and active:', {
-          socketId,
-          userId: existingProvider.userId?.toString()
-        });
-        // Enhanced response for re-registration
+        // Just update the existing provider's models
+        existingProvider.models = [...new Set(providerInfo.models)];
+        existingProvider.lastHeartbeat = Date.now();
+        
         providerInfo.ws.send(JSON.stringify({
           type: 'registered',
           status: 'already_registered',
-          message: 'Already registered as provider',
+          message: 'Provider models updated',
           socketId: socketId,
           timestamp: Date.now()
         }));
@@ -173,6 +172,13 @@ class ProviderManager {
       if (!user) {
         console.error('Provider registration failed: Invalid or inactive user');
         return { success: false, status: 'error', message: 'Invalid or inactive user' };
+      }
+
+      // Before registering new provider, remove any existing ones for this user
+      for (const [existingSocketId, provider] of this.providers.entries()) {
+        if (provider.userId?.toString() === user._id.toString()) {
+          this.removeProvider(existingSocketId);
+        }
       }
 
       // Check for duplicate models in the registration request
